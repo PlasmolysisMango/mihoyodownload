@@ -215,6 +215,13 @@ class DownloadTask extends ChangeNotifier {
     _setStatus(DownloadStatus.queued);
   }
 
+  /// Restores state loaded from persistence without notifying listeners;
+  /// only used before the task is attached to the UI.
+  void restoreState(DownloadStatus status, int receivedBytes) {
+    _status = status;
+    _receivedBytes = receivedBytes;
+  }
+
   void _setStatus(DownloadStatus value) {
     _status = value;
     notifyListeners();

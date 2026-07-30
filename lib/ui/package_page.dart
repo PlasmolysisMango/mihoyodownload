@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
+import '../core/app_settings.dart';
 import '../core/hoyoplay_client.dart';
 import '../core/launcher_region.dart';
 import '../download/download_manager.dart';
@@ -45,10 +45,12 @@ class _PackagePageState extends State<PackagePage> {
 
   Future<void> _startDownload(GamePackageResource resource) async {
     final manager = context.read<DownloadManager>();
+    final settings = context.read<AppSettings>();
     final navigator = Navigator.of(context);
-    final baseDir = await getApplicationDocumentsDirectory();
+    // Uses the directory chosen in settings (may be an external drive).
+    final baseDir = await settings.resolveDownloadDir();
     final saveDir =
-        '${baseDir.path}/downloads/${widget.game.gameId.biz}_${resource.version}';
+        '$baseDir/${widget.game.gameId.biz}_${resource.version}';
     manager.addPackageFiles(
       groupName: '${widget.game.name} ${resource.version}',
       saveDir: saveDir,

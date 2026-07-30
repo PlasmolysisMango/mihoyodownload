@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Required for downloading game packages in release builds. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Writing to user-chosen directories (SD card / USB OTG). Legacy
+         storage permissions cover Android 10-, "All files access" covers 11+. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
     <application
         android:label="HoYo Downloader"
         android:name="${applicationName}"

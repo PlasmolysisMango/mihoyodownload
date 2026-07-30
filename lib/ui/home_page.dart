@@ -9,6 +9,7 @@ import '../models/models.dart';
 import 'downloads_page.dart';
 import 'format.dart';
 import 'package_page.dart';
+import 'settings_page.dart';
 
 /// Game list page: pick a server region, then a game to download.
 class HomePage extends StatefulWidget {
@@ -44,6 +45,15 @@ class _HomePageState extends State<HomePage> {
               MaterialPageRoute(builder: (_) => const DownloadsPage()),
             );
           }),
+          IconButton(
+            tooltip: '设置',
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SettingsPage()),
+              );
+            },
+          ),
         ],
       ),
       body: Column(
