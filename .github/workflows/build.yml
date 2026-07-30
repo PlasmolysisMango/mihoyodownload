@@ -66,6 +66,10 @@ jobs:
           fi
       - run: flutter build apk --release
       - run: flutter build apk --release --split-per-abi
+      # Shows which certificate actually signed the artifact:
+      # release key prints "CN=HoYo Downloader", debug fallback prints "CN=Android Debug".
+      - name: Print APK signing certificate
+        run: keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | head -8
       - uses: actions/upload-artifact@v4
         with:
           name: hoyo_downloader-android

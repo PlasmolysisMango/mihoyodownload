@@ -9,16 +9,20 @@ import 'package:hoyo_downloader/download/download_task.dart';
 
 /// A tiny local HTTP server supporting Range requests, used to verify the
 /// download engine's resume and md5 logic without touching the real CDN.
+/// [throttle] delays each chunk so tests can pause mid-transfer reliably.
 class _RangeServer {
-  _RangeServer(this.data);
+  _RangeServer(this.data, {this.throttle});
+
+  static const chunkSize = 64 * 1024;
 
   final Uint8List data;
+  final Duration? throttle;
   late HttpServer _server;
   int requestCount = 0;
 
   Future<Uri> start() async {
     _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    _server.listen((request) {
+    _server.listen((request) async {
       requestCount++;
       final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
       int start = 0;
@@ -29,8 +33,21 @@ class _RangeServer {
             'bytes $start-${data.length - 1}/${data.length}');
       }
       request.response.headers.contentLength = data.length - start;
-      request.response.add(data.sublist(start));
-      request.response.close();
+      try {
+        if (throttle == null) {
+          request.response.add(data.sublist(start));
+        } else {
+          for (int i = start; i < data.length; i += chunkSize) {
+            request.response
+                .add(data.sublist(i, min(i + chunkSize, data.length)));
+            await request.response.flush();
+            await Future<void>.delayed(throttle!);
+          }
+        }
+        await request.response.close();
+      } catch (_) {
+        // Client aborted mid-transfer (pause/cancel), nothing to do.
+      }
     });
     return Uri.parse('http://127.0.0.1:${_server.port}/file.bin');
   }
@@ -128,7 +145,10 @@ void main() {
 
   test('pause stops the task, resume completes it', () async {
     final data = randomBytes(1024 * 1024);
-    final server = _RangeServer(data);
+    // Throttled server: 64 KB per 30 ms, the full file takes ~500 ms so the
+    // pause below is guaranteed to land mid-transfer on any runner speed.
+    final server =
+        _RangeServer(data, throttle: const Duration(milliseconds: 30));
     final uri = await server.start();
 
     final savePath = '${tempDir.path}/file.bin';
@@ -141,18 +161,25 @@ void main() {
     );
 
     final firstRun = task.run();
-    // Pause almost immediately after the transfer starts.
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    // Wait until some bytes arrived, then pause mid-transfer.
+    while (task.receivedBytes == 0) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
     task.pause();
     final ok1 = await firstRun;
-    expect(ok1, isFalse);
 
-    // Paused (or already finished on a very fast loopback).
-    if (task.status == DownloadStatus.paused) {
-      task.reset();
-      final ok2 = await task.run();
-      expect(ok2, isTrue);
-    }
+    expect(ok1, isFalse);
+    expect(task.status, DownloadStatus.paused);
+    expect(File('${savePath}_tmp').existsSync(), isTrue);
+    expect(task.receivedBytes, lessThan(data.length));
+
+    task.reset();
+    final ok2 = await task.run();
+
+    expect(ok2, isTrue);
+    expect(task.status, DownloadStatus.completed);
+    // Resume must have issued a second (Range) request.
+    expect(server.requestCount, greaterThanOrEqualTo(2));
     expect(await File(savePath).readAsBytes(), data);
     await server.stop();
   });
