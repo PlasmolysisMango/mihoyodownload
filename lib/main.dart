@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'core/app_settings.dart';
 import 'core/hoyoplay_client.dart';
 import 'download/download_manager.dart';
+import 'download/download_notification_service.dart';
 import 'ui/home_page.dart';
 
 Future<void> main() async {
@@ -14,6 +15,9 @@ Future<void> main() async {
   final manager = DownloadManager(prefs: prefs);
   // Bring back tasks from the previous session as paused entries.
   await manager.restoreTasks();
+  // Progress notifications + Android foreground service for background
+  // downloads; no-op on unsupported platforms.
+  await DownloadNotificationService(manager).init();
   runApp(HoYoDownloaderApp(settings: settings, manager: manager));
 }
 
