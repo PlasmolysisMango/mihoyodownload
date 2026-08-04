@@ -57,12 +57,27 @@ jobs:
             /usr/local/lib/android/sdk/ndk/${{ env.ANDROID_NDK_VERSION }}
             /usr/local/lib/android/sdk/cmake/${{ env.ANDROID_CMAKE_VERSION }}
           key: ${{ runner.os }}-android-native-${{ env.ANDROID_NDK_VERSION }}-${{ env.ANDROID_CMAKE_VERSION }}
+      - name: Resolve Android sdkmanager
+        id: android-sdkmanager
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDK_ROOT="${SDK_ROOT:-/usr/local/lib/android/sdk}"
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "path=$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" >> "$GITHUB_OUTPUT"
+          else
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -path "*/bin/sdkmanager" -type f | sort -V | tail -1)"
+            if [ -z "$SDKMANAGER" ]; then
+              echo "sdkmanager not found under $SDK_ROOT/cmdline-tools" >&2
+              exit 1
+            fi
+            echo "path=$SDKMANAGER" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Android NDK
         if: steps.android-native-cache.outputs.cache-hit != 'true'
-        run: yes | sdkmanager "ndk;${{ env.ANDROID_NDK_VERSION }}"
+        run: yes | "${{ steps.android-sdkmanager.outputs.path }}" "ndk;${{ env.ANDROID_NDK_VERSION }}"
       - name: Install Android CMake
         if: steps.android-native-cache.outputs.cache-hit != 'true'
-        run: yes | sdkmanager "cmake;${{ env.ANDROID_CMAKE_VERSION }}"
+        run: yes | "${{ steps.android-sdkmanager.outputs.path }}" "cmake;${{ env.ANDROID_CMAKE_VERSION }}"
       - run: flutter pub get
       # Optional release signing: configure the four ANDROID_* secrets to sign
       # with your own keystore; otherwise the debug key is used automatically.
