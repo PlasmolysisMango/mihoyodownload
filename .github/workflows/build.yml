@@ -9,6 +9,8 @@ on:
 
 env:
   FLUTTER_VERSION: '3.32.5'
+  ANDROID_NDK_VERSION: '27.0.12077973'
+  ANDROID_CMAKE_VERSION: '3.22.1'
 
 jobs:
   # ---------- Analyze & unit tests, gate for all builds ----------
@@ -37,11 +39,30 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+            pubspec.lock
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
+      - name: Cache Android native tools
+        id: android-native-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/${{ env.ANDROID_NDK_VERSION }}
+            /usr/local/lib/android/sdk/cmake/${{ env.ANDROID_CMAKE_VERSION }}
+          key: ${{ runner.os }}-android-native-${{ env.ANDROID_NDK_VERSION }}-${{ env.ANDROID_CMAKE_VERSION }}
+      - name: Install Android NDK
+        if: steps.android-native-cache.outputs.cache-hit != 'true'
+        run: yes | sdkmanager "ndk;${{ env.ANDROID_NDK_VERSION }}"
+      - name: Install Android CMake
+        if: steps.android-native-cache.outputs.cache-hit != 'true'
+        run: yes | sdkmanager "cmake;${{ env.ANDROID_CMAKE_VERSION }}"
       - run: flutter pub get
       # Optional release signing: configure the four ANDROID_* secrets to sign
       # with your own keystore; otherwise the debug key is used automatically.
@@ -64,15 +85,15 @@ jobs:
           else
             echo "No keystore secrets, falling back to debug signing."
           fi
-      - run: flutter build apk --release --target-platform android-arm64 --split-per-abi
+      - run: flutter build apk --release --target-platform android-arm64
       # Shows which certificate actually signed the artifact:
       # release key prints "CN=HoYo Downloader", debug fallback prints "CN=Android Debug".
       - name: Print APK signing certificate
-        run: keytool -printcert -jarfile build/app/outputs/flutter-apk/app-arm64-v8a-release.apk | head -8
+        run: keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | head -8
       - uses: actions/upload-artifact@v4
         with:
           name: hoyo_downloader-android-arm64-v8a
-          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
 
   # ---------- Windows ----------
   windows:
