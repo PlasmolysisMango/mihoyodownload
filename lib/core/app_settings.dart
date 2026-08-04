@@ -8,6 +8,8 @@ class AppSettings extends ChangeNotifier {
   AppSettings(this._prefs);
 
   static const _kDownloadDir = 'download_dir';
+  static const _kMaxConcurrent = 'max_concurrent';
+  static const _kSpeedLimit = 'speed_limit_bps';
 
   final SharedPreferences _prefs;
 
@@ -32,6 +34,22 @@ class AppSettings extends ChangeNotifier {
     } else {
       await _prefs.setString(_kDownloadDir, path);
     }
+    notifyListeners();
+  }
+
+  /// Max simultaneous download tasks (1-8).
+  int get maxConcurrent => (_prefs.getInt(_kMaxConcurrent) ?? 2).clamp(1, 8);
+
+  Future<void> setMaxConcurrent(int value) async {
+    await _prefs.setInt(_kMaxConcurrent, value.clamp(1, 8));
+    notifyListeners();
+  }
+
+  /// Global download speed limit in bytes/second; 0 = unlimited.
+  int get speedLimitBytesPerSec => _prefs.getInt(_kSpeedLimit) ?? 0;
+
+  Future<void> setSpeedLimit(int bytesPerSecond) async {
+    await _prefs.setInt(_kSpeedLimit, bytesPerSecond < 0 ? 0 : bytesPerSecond);
     notifyListeners();
   }
 }

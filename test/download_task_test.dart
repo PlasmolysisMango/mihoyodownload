@@ -6,6 +6,7 @@ import 'package:convert/convert.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hoyo_downloader/download/download_task.dart';
+import 'package:hoyo_downloader/download/rate_limiter.dart';
 
 /// A tiny local HTTP server supporting Range requests, used to verify the
 /// download engine's resume and md5 logic without touching the real CDN.
@@ -140,6 +141,33 @@ void main() {
     expect(task.status, DownloadStatus.failed);
     expect(File(savePath).existsSync(), isFalse);
     expect(File('${savePath}_tmp').existsSync(), isFalse);
+    await server.stop();
+  });
+
+  test('rate limiter throttles a real transfer', () async {
+    final data = randomBytes(512 * 1024);
+    final server = _RangeServer(data);
+    final uri = await server.start();
+
+    // 256 KB/s: the first-second burst covers half the file, the rest
+    // needs ~1 s of refill, so the download cannot finish instantly.
+    final limiter = RateLimiter()..setLimit(256 * 1024);
+    final savePath = '${tempDir.path}/file.bin';
+    final task = DownloadTask(
+      url: uri.toString(),
+      savePath: savePath,
+      totalSize: data.length,
+      expectedMd5: hex.encode(md5.convert(data).bytes),
+      displayName: 'file.bin',
+      rateLimiter: limiter,
+    );
+    final sw = Stopwatch()..start();
+    final ok = await task.run();
+    sw.stop();
+
+    expect(ok, isTrue);
+    expect(sw.elapsedMilliseconds, greaterThanOrEqualTo(600));
+    expect(await File(savePath).readAsBytes(), data);
     await server.stop();
   });
 

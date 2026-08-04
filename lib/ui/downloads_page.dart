@@ -74,7 +74,8 @@ class _TotalBar extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             '总进度 ${formatBytes(received)} / ${formatBytes(total)}'
-            '   速度 ${formatSpeed(manager.totalSpeed)}',
+            '   速度 ${formatSpeed(manager.totalSpeed)}'
+            '   剩余 ${formatEta(total - received, manager.totalSpeed)}',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
@@ -165,7 +166,7 @@ class _TaskTile extends StatelessWidget {
       case DownloadStatus.queued:
         return '排队中';
       case DownloadStatus.downloading:
-        return '下载中 ${formatSpeed(task.speed)}';
+        return '下载中 ${formatSpeed(task.speed)} · 剩余 ${formatEta(task.totalSize - task.receivedBytes, task.speed)}';
       case DownloadStatus.paused:
         return '已暂停';
       case DownloadStatus.verifying:

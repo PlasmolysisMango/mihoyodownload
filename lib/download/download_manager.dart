@@ -6,19 +6,37 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/models.dart';
 import 'download_task.dart';
+import 'rate_limiter.dart';
 
 /// Serial/concurrent download queue, the counterpart of Starward's
 /// `GameInstallService` task scheduling (simplified to download-only).
 /// The task list survives app restarts: metadata goes to SharedPreferences,
 /// while the `_tmp` files on disk keep the resumable download progress.
 class DownloadManager extends ChangeNotifier {
-  DownloadManager({this.maxConcurrent = 2, SharedPreferences? prefs})
-      : _prefs = prefs;
+  DownloadManager({int maxConcurrent = 2, SharedPreferences? prefs})
+      : _maxConcurrent = maxConcurrent,
+        _prefs = prefs;
 
   static const _kTasksKey = 'download_tasks';
 
-  /// Max files downloading at the same time.
-  final int maxConcurrent;
+  /// Max files downloading at the same time; adjustable at runtime.
+  /// Lowering it never interrupts running tasks, they just drain naturally.
+  int _maxConcurrent;
+  int get maxConcurrent => _maxConcurrent;
+  set maxConcurrent(int value) {
+    _maxConcurrent = value.clamp(1, 8);
+    notifyListeners();
+    _pump();
+  }
+
+  /// Shared limiter for the aggregate speed of all tasks.
+  final RateLimiter rateLimiter = RateLimiter();
+
+  /// Sets the global speed limit in bytes/second; 0 = unlimited.
+  void setSpeedLimit(int bytesPerSecond) {
+    rateLimiter.setLimit(bytesPerSecond);
+    notifyListeners();
+  }
 
   final SharedPreferences? _prefs;
 
@@ -52,6 +70,7 @@ class DownloadManager extends ChangeNotifier {
         expectedMd5: file.md5,
         displayName: file.fileName,
         groupName: groupName,
+        rateLimiter: rateLimiter,
       );
       task.addListener(notifyListeners);
       _tasks.add(task);
@@ -81,6 +100,7 @@ class DownloadManager extends ChangeNotifier {
         expectedMd5: e['expectedMd5'] as String? ?? '',
         displayName: e['displayName'] as String? ?? '',
         groupName: e['groupName'] as String? ?? '',
+        rateLimiter: rateLimiter,
       );
       if (task.url.isEmpty || task.savePath.isEmpty) continue;
       var status = DownloadStatus.paused;

@@ -72,4 +72,34 @@ void main() {
     expect(m2.tasks, hasLength(1));
     expect(m2.tasks.single.displayName, 'b.zip');
   });
+
+  test('maxConcurrent is adjustable at runtime and clamped', () {
+    final manager = DownloadManager(maxConcurrent: 0);
+    manager.addPackageFiles(
+      groupName: 'Game 1.0',
+      saveDir: tempDir.path,
+      files: [file('a.zip')],
+    );
+    // Tasks stay queued while the limit is 0.
+    expect(manager.tasks.single.status, DownloadStatus.queued);
+
+    manager.maxConcurrent = 3;
+    expect(manager.maxConcurrent, 3);
+    // Raising the limit pumps the queue (the fake url fails, but the task
+    // must have left the queued state).
+    expect(manager.tasks.single.status, isNot(DownloadStatus.queued));
+
+    manager.maxConcurrent = 99;
+    expect(manager.maxConcurrent, 8);
+    manager.maxConcurrent = -1;
+    expect(manager.maxConcurrent, 1);
+  });
+
+  test('setSpeedLimit forwards to the shared rate limiter', () {
+    final manager = DownloadManager(maxConcurrent: 0);
+    manager.setSpeedLimit(2 * 1024 * 1024);
+    expect(manager.rateLimiter.bytesPerSecond, 2 * 1024 * 1024);
+    manager.setSpeedLimit(0);
+    expect(manager.rateLimiter.bytesPerSecond, 0);
+  });
 }

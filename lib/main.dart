@@ -12,7 +12,11 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
   final settings = AppSettings(prefs);
-  final manager = DownloadManager(prefs: prefs);
+  final manager = DownloadManager(
+    maxConcurrent: settings.maxConcurrent,
+    prefs: prefs,
+  );
+  manager.setSpeedLimit(settings.speedLimitBytesPerSec);
   // Bring back tasks from the previous session as paused entries.
   await manager.restoreTasks();
   // Progress notifications + Android foreground service for background

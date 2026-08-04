@@ -103,7 +103,8 @@ class DownloadNotificationService {
           _progressId,
           '正在下载（$percent%）',
           '${formatBytes(received)} / ${formatBytes(total)}'
-          ' · ${formatSpeed(_manager.totalSpeed)}',
+          ' · ${formatSpeed(_manager.totalSpeed)}'
+          ' · 剩余 ${formatEta(total - received, _manager.totalSpeed)}',
           notificationDetails: details,
           foregroundServiceTypes: {
             AndroidServiceForegroundType.foregroundServiceTypeDataSync,

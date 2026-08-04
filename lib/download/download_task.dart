@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'rate_limiter.dart';
+
 /// Lifecycle states of a [DownloadTask].
 enum DownloadStatus {
   queued,
@@ -31,6 +33,7 @@ class DownloadTask extends ChangeNotifier {
     required this.expectedMd5,
     required this.displayName,
     this.groupName = '',
+    this.rateLimiter,
   });
 
   final String url;
@@ -45,6 +48,9 @@ class DownloadTask extends ChangeNotifier {
 
   /// Which game/version this file belongs to, for UI grouping.
   final String groupName;
+
+  /// Shared limiter throttling the aggregate download speed; null = unlimited.
+  final RateLimiter? rateLimiter;
 
   DownloadStatus _status = DownloadStatus.queued;
   DownloadStatus get status => _status;
@@ -160,6 +166,11 @@ class DownloadTask extends ChangeNotifier {
     try {
       await for (final chunk in response.stream) {
         if (_abortRequested) break;
+        // Throttle before writing, like Starward's _rateLimiter.AcquireAsync.
+        if (rateLimiter != null) {
+          await rateLimiter!.acquire(chunk.length);
+          if (_abortRequested) break;
+        }
         sink.add(chunk);
         _receivedBytes += chunk.length;
       }

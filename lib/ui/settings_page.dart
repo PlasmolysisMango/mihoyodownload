@@ -6,6 +6,20 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 
 import '../core/app_settings.dart';
+import '../download/download_manager.dart';
+import 'format.dart';
+
+/// Speed limit presets in bytes/second; 0 = unlimited.
+const _speedLimitOptions = [
+  0,
+  512 * 1024,
+  1 * 1024 * 1024,
+  2 * 1024 * 1024,
+  5 * 1024 * 1024,
+  10 * 1024 * 1024,
+  20 * 1024 * 1024,
+  50 * 1024 * 1024,
+];
 
 /// Settings page: choose the download directory (internal storage,
 /// SD card or USB drives) with the system directory picker.
@@ -129,6 +143,53 @@ class _SettingsPageState extends State<SettingsPage> {
               '• 更改目录只影响之后新添加的任务，进行中的任务仍写入原目录。\n'
               '• iOS 仅支持应用内目录。',
               style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ),
+          const Divider(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Text('下载参数',
+                style: Theme.of(context).textTheme.titleSmall),
+          ),
+          ListTile(
+            leading: const Icon(Icons.dynamic_feed),
+            title: const Text('同时下载任务数'),
+            subtitle: const Text('调低不会中断已在进行的任务'),
+            trailing: DropdownButton<int>(
+              value: settings.maxConcurrent,
+              items: [
+                for (var i = 1; i <= 8; i++)
+                  DropdownMenuItem(value: i, child: Text('$i')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                settings.setMaxConcurrent(value);
+                // Apply immediately to the running queue.
+                context.read<DownloadManager>().maxConcurrent = value;
+              },
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.speed),
+            title: const Text('下载限速'),
+            subtitle: const Text('所有任务共享的总速度上限'),
+            trailing: DropdownButton<int>(
+              value: _speedLimitOptions.contains(settings.speedLimitBytesPerSec)
+                  ? settings.speedLimitBytesPerSec
+                  : 0,
+              items: [
+                for (final bps in _speedLimitOptions)
+                  DropdownMenuItem(
+                    value: bps,
+                    child: Text(bps == 0 ? '不限速' : formatSpeed(bps)),
+                  ),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                settings.setSpeedLimit(value);
+                // Apply immediately to the running queue.
+                context.read<DownloadManager>().setSpeedLimit(value);
+              },
             ),
           ),
         ],
