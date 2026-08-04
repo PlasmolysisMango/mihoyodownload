@@ -5,8 +5,11 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/models.dart';
+import '../models/sophon_models.dart';
+import 'download_job.dart';
 import 'download_task.dart';
 import 'rate_limiter.dart';
+import 'sophon_download_task.dart';
 
 /// Serial/concurrent download queue, the counterpart of Starward's
 /// `GameInstallService` task scheduling (simplified to download-only).
@@ -40,8 +43,8 @@ class DownloadManager extends ChangeNotifier {
 
   final SharedPreferences? _prefs;
 
-  final List<DownloadTask> _tasks = [];
-  List<DownloadTask> get tasks => List.unmodifiable(_tasks);
+  final List<DownloadJob> _tasks = [];
+  List<DownloadJob> get tasks => List.unmodifiable(_tasks);
 
   int get activeCount => _tasks.where((t) => t.isActive).length;
 
@@ -80,6 +83,35 @@ class DownloadManager extends ChangeNotifier {
     _pump();
   }
 
+  /// Adds Sophon categories as chunk-based jobs.
+  void addSophonManifests({
+    required String groupName,
+    required String saveDir,
+    required String version,
+    required Iterable<(SophonManifestMeta, SophonChunkManifest)> manifests,
+  }) {
+    for (final (meta, manifest) in manifests) {
+      final savePath = '$saveDir/${meta.matchingField}';
+      if (_tasks.any((t) =>
+          t.savePath == savePath && t.status != DownloadStatus.canceled)) {
+        continue;
+      }
+      final task = SophonDownloadTask(
+        meta: meta,
+        initialManifest: manifest,
+        saveDir: saveDir,
+        version: version,
+        groupName: groupName,
+        rateLimiter: rateLimiter,
+      );
+      task.addListener(notifyListeners);
+      _tasks.add(task);
+    }
+    _persist();
+    notifyListeners();
+    _pump();
+  }
+
   /// Reloads tasks saved by a previous session. Progress is re-derived from
   /// the files on disk; unfinished tasks come back as paused so the user
   /// decides when to spend bandwidth again.
@@ -93,27 +125,46 @@ class DownloadManager extends ChangeNotifier {
       return;
     }
     for (final e in list.whereType<Map<String, dynamic>>()) {
-      final task = DownloadTask(
-        url: e['url'] as String? ?? '',
-        savePath: e['savePath'] as String? ?? '',
-        totalSize: e['totalSize'] as int? ?? 0,
-        expectedMd5: e['expectedMd5'] as String? ?? '',
-        displayName: e['displayName'] as String? ?? '',
-        groupName: e['groupName'] as String? ?? '',
-        rateLimiter: rateLimiter,
-      );
-      if (task.url.isEmpty || task.savePath.isEmpty) continue;
+      final type = e['type'] as String? ?? 'package';
+      DownloadJob? task;
+      if (type == 'sophon') {
+        final metaJson = e['meta'];
+        if (metaJson is! Map<String, dynamic>) continue;
+        task = SophonDownloadTask(
+          meta: SophonManifestMeta.fromPersistedJson(metaJson),
+          saveDir: e['saveDir'] as String? ?? '',
+          version: e['version'] as String? ?? '',
+          groupName: e['groupName'] as String? ?? '',
+          rateLimiter: rateLimiter,
+        );
+      } else {
+        task = DownloadTask(
+          url: e['url'] as String? ?? '',
+          savePath: e['savePath'] as String? ?? '',
+          totalSize: e['totalSize'] as int? ?? 0,
+          expectedMd5: e['expectedMd5'] as String? ?? '',
+          displayName: e['displayName'] as String? ?? '',
+          groupName: e['groupName'] as String? ?? '',
+          rateLimiter: rateLimiter,
+        );
+      }
+      if (task.savePath.isEmpty) continue;
       var status = DownloadStatus.paused;
       var received = 0;
-      final finalFile = File(task.savePath);
-      if (await finalFile.exists() &&
-          await finalFile.length() == task.totalSize) {
+      if ((e['status'] as String?) == 'completed') {
         status = DownloadStatus.completed;
         received = task.totalSize;
-      } else {
-        final tmpFile = File('${task.savePath}_tmp');
-        if (await tmpFile.exists()) {
-          received = await tmpFile.length();
+      } else if (task is DownloadTask) {
+        final finalFile = File(task.savePath);
+        if (await finalFile.exists() &&
+            await finalFile.length() == task.totalSize) {
+          status = DownloadStatus.completed;
+          received = task.totalSize;
+        } else {
+          final tmpFile = File('${task.savePath}_tmp');
+          if (await tmpFile.exists()) {
+            received = await tmpFile.length();
+          }
         }
       }
       task.restoreState(status, received);
@@ -129,17 +180,7 @@ class DownloadManager extends ChangeNotifier {
     if (prefs == null) return;
     final list = _tasks
         .where((t) => t.status != DownloadStatus.canceled)
-        .map((t) => {
-              'url': t.url,
-              'savePath': t.savePath,
-              'totalSize': t.totalSize,
-              'expectedMd5': t.expectedMd5,
-              'displayName': t.displayName,
-              'groupName': t.groupName,
-              'status': t.status == DownloadStatus.completed
-                  ? 'completed'
-                  : 'paused',
-            })
+        .map((t) => t.toPersistedJson())
         .toList();
     prefs.setString(_kTasksKey, jsonEncode(list));
   }
@@ -154,17 +195,17 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  Future<void> _runTask(DownloadTask task) async {
+  Future<void> _runTask(DownloadJob task) async {
     await task.run();
     _persist();
     _pump();
   }
 
-  void pause(DownloadTask task) {
+  void pause(DownloadJob task) {
     task.pause();
   }
 
-  void resume(DownloadTask task) {
+  void resume(DownloadJob task) {
     if (task.status == DownloadStatus.paused ||
         task.status == DownloadStatus.failed) {
       task.reset();
@@ -172,7 +213,7 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  Future<void> cancel(DownloadTask task) async {
+  Future<void> cancel(DownloadJob task) async {
     await task.cancel();
     _persist();
     _pump();

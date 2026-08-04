@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:convert/convert.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hoyo_downloader/download/download_job.dart';
 import 'package:hoyo_downloader/download/download_task.dart';
 import 'package:hoyo_downloader/download/rate_limiter.dart';
 
@@ -122,6 +123,29 @@ void main() {
     await server.stop();
   });
 
+  test('redownloads existing final file when md5 mismatches', () async {
+    final data = randomBytes(128 * 1024);
+    final server = _RangeServer(data);
+    final uri = await server.start();
+
+    final savePath = '${tempDir.path}/file.bin';
+    // Same length, wrong content: size-only checks would incorrectly skip it.
+    await File(savePath).writeAsBytes(List.filled(data.length, 1));
+    final task = DownloadTask(
+      url: uri.toString(),
+      savePath: savePath,
+      totalSize: data.length,
+      expectedMd5: hex.encode(md5.convert(data).bytes),
+      displayName: 'file.bin',
+    );
+    final ok = await task.run();
+
+    expect(ok, isTrue);
+    expect(task.status, DownloadStatus.completed);
+    expect(await File(savePath).readAsBytes(), data);
+    await server.stop();
+  });
+
   test('fails and deletes tmp when md5 mismatches', () async {
     final data = randomBytes(64 * 1024);
     final server = _RangeServer(data);
@@ -141,6 +165,33 @@ void main() {
     expect(task.status, DownloadStatus.failed);
     expect(File(savePath).existsSync(), isFalse);
     expect(File('${savePath}_tmp').existsSync(), isFalse);
+    await server.stop();
+  });
+
+  test('auto retries once from scratch after corrupted tmp md5 mismatch',
+      () async {
+    final data = randomBytes(128 * 1024);
+    final server = _RangeServer(data);
+    final uri = await server.start();
+
+    final savePath = '${tempDir.path}/file.bin';
+    // A full-size but corrupted tmp simulates a bad resume/CDN range result.
+    await File('${savePath}_tmp').writeAsBytes(List.filled(data.length, 2));
+    final task = DownloadTask(
+      url: uri.toString(),
+      savePath: savePath,
+      totalSize: data.length,
+      expectedMd5: hex.encode(md5.convert(data).bytes),
+      displayName: 'file.bin',
+    );
+    final ok = await task.run();
+
+    expect(ok, isTrue);
+    expect(task.status, DownloadStatus.completed);
+    expect(await File(savePath).readAsBytes(), data);
+    // No network request for the first bad tmp verification, then one clean
+    // redownload request after the mismatch is detected.
+    expect(server.requestCount, 1);
     await server.stop();
   });
 

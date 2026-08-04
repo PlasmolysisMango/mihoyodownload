@@ -6,11 +6,12 @@ import '../core/hoyoplay_client.dart';
 import '../core/launcher_region.dart';
 import '../download/download_manager.dart';
 import '../models/models.dart';
+import '../models/sophon_models.dart';
 import 'downloads_page.dart';
 import 'format.dart';
 
-/// Package selection page: choose game/audio package files of the latest
-/// version and enqueue them for download.
+/// Package selection page: prefer Sophon/chunk mode and keep zip packages as
+/// a compatibility fallback.
 class PackagePage extends StatefulWidget {
   const PackagePage({super.key, required this.region, required this.game});
 
@@ -22,51 +23,116 @@ class PackagePage extends StatefulWidget {
 }
 
 class _PackagePageState extends State<PackagePage> {
-  late Future<GamePackage?> _packageFuture;
-  final Set<GamePackageFile> _selected = {};
-  bool _initializedSelection = false;
+  late Future<_PackageData> _dataFuture;
+  final Set<GamePackageFile> _selectedPackages = {};
+  final Set<String> _selectedCategoryIds = {};
+  bool _initializedPackageSelection = false;
+  bool _initializedSophonSelection = false;
+  bool _useChunkMode = true;
+  bool _starting = false;
 
   @override
   void initState() {
     super.initState();
+    _dataFuture = _loadData();
+  }
+
+  Future<_PackageData> _loadData() async {
     final client = context.read<HoYoPlayApiClient>();
-    _packageFuture =
-        client.getGamePackage(widget.region, widget.game.gameId);
+    final packageFuture = client.getGamePackage(widget.region, widget.game.gameId);
+    SophonBuild? build;
+    try {
+      final branch = await client.getGameBranch(widget.region, widget.game.gameId);
+      if (branch != null && branch.main.packageId.isNotEmpty) {
+        build = await client.getSophonChunkBuild(
+          widget.region,
+          widget.game.gameId,
+          branch.main,
+        );
+      }
+    } catch (_) {
+      // Keep package mode usable when Sophon is unavailable.
+    }
+    return _PackageData(package: await packageFuture, sophonBuild: build);
   }
 
-  int get _selectedSize => _selected.fold(0, (s, f) => s + f.size);
+  int get _selectedPackageSize =>
+      _selectedPackages.fold(0, (s, f) => s + f.size);
 
-  void _initSelection(GamePackageResource resource) {
-    if (_initializedSelection) return;
-    _initializedSelection = true;
-    // Game packages are required parts of the archive, check them by default.
-    _selected.addAll(resource.gamePackages);
+  void _initPackageSelection(GamePackageResource resource) {
+    if (_initializedPackageSelection) return;
+    _initializedPackageSelection = true;
+    _selectedPackages.addAll(resource.gamePackages);
   }
 
-  Future<void> _startDownload(GamePackageResource resource) async {
-    final manager = context.read<DownloadManager>();
+  void _initSophonSelection(List<SophonManifestMeta> manifests) {
+    if (_initializedSophonSelection) return;
+    _initializedSophonSelection = true;
+    for (final meta in manifests) {
+      if (meta.matchingField == 'game') {
+        _selectedCategoryIds.add(meta.categoryId);
+      }
+    }
+    if (_selectedCategoryIds.isEmpty && manifests.isNotEmpty) {
+      _selectedCategoryIds.add(manifests.first.categoryId);
+    }
+  }
+
+  Future<String> _downloadSaveDir(String version) async {
     final settings = context.read<AppSettings>();
-    final navigator = Navigator.of(context);
-    // Uses the directory chosen in settings (may be an external drive).
     final baseDir = await settings.resolveDownloadDir();
-    final saveDir =
-        '$baseDir/${widget.game.gameId.biz}_${resource.version}';
+    return '$baseDir/${widget.game.gameId.biz}_$version';
+  }
+
+  Future<void> _startPackageDownload(GamePackageResource resource) async {
+    final manager = context.read<DownloadManager>();
+    final navigator = Navigator.of(context);
+    final saveDir = await _downloadSaveDir(resource.version);
     manager.addPackageFiles(
       groupName: '${widget.game.name} ${resource.version}',
       saveDir: saveDir,
-      files: _selected.toList(),
+      files: _selectedPackages.toList(),
     );
-    navigator.push(
-      MaterialPageRoute(builder: (_) => const DownloadsPage()),
-    );
+    navigator.push(MaterialPageRoute(builder: (_) => const DownloadsPage()));
+  }
+
+  Future<void> _startSophonDownload(SophonBuild build) async {
+    final manager = context.read<DownloadManager>();
+    final client = context.read<HoYoPlayApiClient>();
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final selected = build.manifests
+        .where((m) => _selectedCategoryIds.contains(m.categoryId))
+        .toList();
+    if (selected.isEmpty) return;
+    setState(() => _starting = true);
+    try {
+      final parsed = <(SophonManifestMeta, SophonChunkManifest)>[];
+      for (final meta in selected) {
+        final manifest = await client.downloadAndParseSophonManifest(meta);
+        parsed.add((meta, manifest));
+      }
+      final saveDir = await _downloadSaveDir(build.tag);
+      manager.addSophonManifests(
+        groupName: '${widget.game.name} ${build.tag}',
+        saveDir: saveDir,
+        version: build.tag,
+        manifests: parsed,
+      );
+      navigator.push(MaterialPageRoute(builder: (_) => const DownloadsPage()));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Chunk 清单加载失败：$e')));
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(widget.game.name)),
-      body: FutureBuilder<GamePackage?>(
-        future: _packageFuture,
+      body: FutureBuilder<_PackageData>(
+        future: _dataFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState != ConnectionState.done) {
             return const Center(child: CircularProgressIndicator());
@@ -74,52 +140,139 @@ class _PackagePageState extends State<PackagePage> {
           if (snapshot.hasError) {
             return Center(child: Text('加载失败：${snapshot.error}'));
           }
-          final resource = snapshot.data?.main.major;
-          if (resource == null) {
-            return const Center(child: Text('该游戏暂无完整安装包（可能仅支持 Chunk 模式）'));
+          final data = snapshot.data!;
+          final build = data.sophonBuild;
+          final packageResource = data.package?.main.major;
+          if (build != null && build.manifests.isNotEmpty && _useChunkMode) {
+            _initSophonSelection(build.manifests);
+            return _buildSophonMode(build, packageResource != null);
           }
-          _initSelection(resource);
-          return Column(
+          if (packageResource != null) {
+            _initPackageSelection(packageResource);
+            return _buildPackageMode(packageResource, build != null);
+          }
+          return const Center(child: Text('暂无可用下载资源'));
+        },
+      ),
+    );
+  }
+
+  Widget _buildSophonMode(SophonBuild build, bool canFallback) {
+    final selected = build.manifests
+        .where((m) => _selectedCategoryIds.contains(m.categoryId))
+        .toList();
+    final selectedSize =
+        selected.fold<int>(0, (sum, m) => sum + m.compressedSize);
+    return Column(
+      children: [
+        _modeBanner(
+          title: 'Chunk 模式（推荐）',
+          subtitle: '按官方小块下载与校验，坏块只重下单个 chunk。',
+          canSwitch: canFallback,
+        ),
+        Expanded(
+          child: ListView(
             children: [
-              Expanded(
-                child: ListView(
-                  children: [
-                    _sectionHeader(context,
-                        '游戏本体 v${resource.version}（${resource.gamePackages.length} 个分卷）'),
-                    for (final file in resource.gamePackages)
-                      _fileTile(file),
-                    if (resource.audioPackages.isNotEmpty)
-                      _sectionHeader(context, '语音包（可选）'),
-                    for (final file in resource.audioPackages)
-                      _fileTile(file, subtitlePrefix: file.language),
-                  ],
-                ),
-              ),
-              SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '已选 ${_selected.length} 个文件\n共 ${formatBytes(_selectedSize)}',
-                          style: Theme.of(context).textTheme.bodyMedium,
-                        ),
-                      ),
-                      FilledButton.icon(
-                        onPressed: _selected.isEmpty
-                            ? null
-                            : () => _startDownload(resource),
-                        icon: const Icon(Icons.download),
-                        label: const Text('开始下载'),
-                      ),
-                    ],
+              _sectionHeader(context, '资源分类 v${build.tag}'),
+              for (final meta in build.manifests) _sophonTile(meta),
+            ],
+          ),
+        ),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '已选 ${selected.length} 个分类\n约 ${formatBytes(selectedSize)}',
+                    style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 ),
-              ),
+                FilledButton.icon(
+                  onPressed: _starting || selected.isEmpty
+                      ? null
+                      : () => _startSophonDownload(build),
+                  icon: _starting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.download),
+                  label: Text(_starting ? '加载清单...' : '开始下载'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPackageMode(GamePackageResource resource, bool canSwitchToChunk) {
+    return Column(
+      children: [
+        _modeBanner(
+          title: '压缩包模式（兼容）',
+          subtitle: '下载官方 zip 分卷；单个分卷校验失败时重下成本较高。',
+          canSwitch: canSwitchToChunk,
+        ),
+        Expanded(
+          child: ListView(
+            children: [
+              _sectionHeader(context,
+                  '游戏本体 v${resource.version}（${resource.gamePackages.length} 个分卷）'),
+              for (final file in resource.gamePackages) _fileTile(file),
+              if (resource.audioPackages.isNotEmpty)
+                _sectionHeader(context, '语音包（可选）'),
+              for (final file in resource.audioPackages)
+                _fileTile(file, subtitlePrefix: file.language),
             ],
-          );
-        },
+          ),
+        ),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '已选 ${_selectedPackages.length} 个文件\n共 ${formatBytes(_selectedPackageSize)}',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: _selectedPackages.isEmpty
+                      ? null
+                      : () => _startPackageDownload(resource),
+                  icon: const Icon(Icons.download),
+                  label: const Text('开始下载'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _modeBanner({
+    required String title,
+    required String subtitle,
+    required bool canSwitch,
+  }) {
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: ListTile(
+        title: Text(title),
+        subtitle: Text(subtitle),
+        trailing: canSwitch
+            ? TextButton(
+                onPressed: () => setState(() => _useChunkMode = !_useChunkMode),
+                child: Text(_useChunkMode ? '用压缩包' : '用 Chunk'),
+              )
+            : null,
       ),
     );
   }
@@ -131,25 +284,53 @@ class _PackagePageState extends State<PackagePage> {
     );
   }
 
+  Widget _sophonTile(SophonManifestMeta meta) {
+    return CheckboxListTile(
+      value: _selectedCategoryIds.contains(meta.categoryId),
+      dense: true,
+      title: Text(meta.displayName, overflow: TextOverflow.ellipsis),
+      subtitle: Text(
+        '${meta.matchingField} · ${formatBytes(meta.compressedSize)} · '
+        '${meta.fileCount} 文件 / ${meta.chunkCount} chunks',
+      ),
+      onChanged: (checked) {
+        setState(() {
+          if (checked == true) {
+            _selectedCategoryIds.add(meta.categoryId);
+          } else {
+            _selectedCategoryIds.remove(meta.categoryId);
+          }
+        });
+      },
+    );
+  }
+
   Widget _fileTile(GamePackageFile file, {String? subtitlePrefix}) {
     final subtitle = [
       if (subtitlePrefix != null && subtitlePrefix.isNotEmpty) subtitlePrefix,
       formatBytes(file.size),
     ].join(' · ');
     return CheckboxListTile(
-      value: _selected.contains(file),
+      value: _selectedPackages.contains(file),
       dense: true,
       title: Text(file.fileName, overflow: TextOverflow.ellipsis),
       subtitle: Text(subtitle),
       onChanged: (checked) {
         setState(() {
           if (checked == true) {
-            _selected.add(file);
+            _selectedPackages.add(file);
           } else {
-            _selected.remove(file);
+            _selectedPackages.remove(file);
           }
         });
       },
     );
   }
+}
+
+class _PackageData {
+  const _PackageData({required this.package, required this.sophonBuild});
+
+  final GamePackage? package;
+  final SophonBuild? sophonBuild;
 }

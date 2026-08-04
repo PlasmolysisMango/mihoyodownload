@@ -3,8 +3,8 @@ import 'package:provider/provider.dart';
 
 import '../core/hoyoplay_client.dart';
 import '../core/launcher_region.dart';
+import '../download/download_job.dart';
 import '../download/download_manager.dart';
-import '../download/download_task.dart';
 import '../models/models.dart';
 import 'downloads_page.dart';
 import 'format.dart';

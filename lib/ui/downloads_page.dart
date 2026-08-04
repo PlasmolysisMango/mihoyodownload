@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../download/download_job.dart';
 import '../download/download_manager.dart';
-import '../download/download_task.dart';
 import 'format.dart';
 
 /// Download management page: per-task progress, pause / resume / cancel.
@@ -88,7 +88,7 @@ class _TaskTile extends StatelessWidget {
   const _TaskTile({required this.manager, required this.task});
 
   final DownloadManager manager;
-  final DownloadTask task;
+  final DownloadJob task;
 
   @override
   Widget build(BuildContext context) {
@@ -161,7 +161,7 @@ class _TaskTile extends StatelessWidget {
     }
   }
 
-  String _statusText(DownloadTask task) {
+  String _statusText(DownloadJob task) {
     switch (task.status) {
       case DownloadStatus.queued:
         return '排队中';

@@ -5,8 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../ui/format.dart';
+import 'download_job.dart';
 import 'download_manager.dart';
-import 'download_task.dart';
 
 /// Shows download progress in the system notification tray.
 ///
