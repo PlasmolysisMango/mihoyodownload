@@ -250,6 +250,7 @@ class _PackagePageState extends State<PackagePage> {
         Expanded(
           child: ListView(
             children: [
+              _packageSelectionActions(resource),
               _sectionHeader(
                 context,
                 '游戏本体 v${resource.version}（${resource.gamePackages.length} 个分卷）',
@@ -312,6 +313,31 @@ class _PackagePageState extends State<PackagePage> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
       child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+    );
+  }
+
+  Widget _packageSelectionActions(GamePackageResource resource) {
+    final files = [...resource.gamePackages, ...resource.audioPackages];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          OutlinedButton.icon(
+            onPressed: () => setState(() {
+              _selectedPackages.addAll(files);
+            }),
+            icon: const Icon(Icons.select_all),
+            label: const Text('全选'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => setState(_selectedPackages.clear),
+            icon: const Icon(Icons.deselect),
+            label: const Text('全不选'),
+          ),
+        ],
+      ),
     );
   }
 

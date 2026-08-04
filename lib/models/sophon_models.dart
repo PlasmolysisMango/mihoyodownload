@@ -135,8 +135,10 @@ class SophonManifestMeta {
   final int chunkCount;
 
   String get displayName {
-    if (matchingField == 'game') return '游戏资源';
+    final field = _normalizeMatchingField(matchingField);
+    if (field == 'game') return '游戏资源';
     if (categoryName.isNotEmpty && categoryName != 'null') return categoryName;
+    if (_isNumericMatchingField(field)) return '游戏资源';
     return '资源 $matchingField';
   }
 
@@ -301,41 +303,33 @@ List<SophonCategoryGroup> groupSophonManifests(
 }
 
 bool _isGameManifest(SophonManifestMeta meta) {
-  final text = _normalizeToken('${meta.matchingField} ${meta.categoryName}');
-  return text == 'game' || text.contains('game');
+  final field = _normalizeMatchingField(meta.matchingField);
+  return field == 'game' || _isNumericMatchingField(field);
 }
 
 String? _detectAudioLanguage(SophonManifestMeta meta) {
-  final text = _normalizeToken('${meta.matchingField} ${meta.categoryName}');
-  final aliases = <String, List<String>>{
-    'zh-cn': [
-      'zhcn',
-      'zh_cn',
-      'zh-cn',
-      'cn',
-      'chinese',
-      'mandarin',
-      '简体',
-      '中文',
-    ],
-    'zh-tw': ['zhtw', 'zh_tw', 'zh-tw', 'zhhk', 'zh_hk', 'zh-hk', '繁体'],
-    'ja-jp': ['jajp', 'ja_jp', 'ja-jp', 'jp', 'japanese', '日文', '日语'],
-    'ko-kr': ['kokr', 'ko_kr', 'ko-kr', 'kr', 'korean', '韩文', '韩语'],
-    'en-us': ['enus', 'en_us', 'en-us', 'en', 'english', '英文', '英语'],
-    'fr-fr': ['frfr', 'fr_fr', 'fr-fr', 'fr', 'french'],
-    'de-de': ['dede', 'de_de', 'de-de', 'de', 'german'],
-    'es-es': ['eses', 'es_es', 'es-es', 'es', 'spanish'],
-    'ru-ru': ['ruru', 'ru_ru', 'ru-ru', 'ru', 'russian'],
-    'th-th': ['thth', 'th_th', 'th-th', 'th', 'thai'],
-    'vi-vn': ['vivn', 'vi_vn', 'vi-vn', 'vi', 'vietnamese'],
-    'id-id': ['idid', 'id_id', 'id-id', 'id', 'indonesian'],
-    'pt-pt': ['ptpt', 'pt_pt', 'pt-pt', 'pt', 'portuguese'],
-  };
-  for (final entry in aliases.entries) {
-    if (entry.value.any(text.contains)) return entry.key;
-  }
-  return null;
+  final field = _normalizeMatchingField(meta.matchingField);
+  final language = field.startsWith('mini-')
+      ? field.substring('mini-'.length)
+      : field;
+  return _supportedAudioLanguages.contains(language) ? language : null;
 }
+
+const _supportedAudioLanguages = [
+  'zh-cn',
+  'zh-tw',
+  'ja-jp',
+  'ko-kr',
+  'en-us',
+  'fr-fr',
+  'de-de',
+  'es-es',
+  'ru-ru',
+  'th-th',
+  'vi-vn',
+  'id-id',
+  'pt-pt',
+];
 
 String _languageDisplayName(String code) {
   return switch (code) {
@@ -377,7 +371,11 @@ int _languageSortKey(String code) {
   return index < 0 ? order.length : index;
 }
 
-String _normalizeToken(String value) => value.toLowerCase().replaceAll(' ', '');
+String _normalizeMatchingField(String value) {
+  return value.trim().toLowerCase().replaceAll('_', '-');
+}
+
+bool _isNumericMatchingField(String value) => RegExp(r'^\d+$').hasMatch(value);
 
 class SophonChunkManifest {
   const SophonChunkManifest({required this.files});
