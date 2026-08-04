@@ -13,9 +13,7 @@ import 'download_manager.dart';
 /// On Android the progress notification is attached to a foreground service
 /// (`startForegroundService`), which keeps the process — and therefore the
 /// Dart download loops — alive while the app is in the background or the
-/// screen is off. Other platforms only get a completion notification:
-/// desktop apps keep running anyway, and iOS suspends the process so socket
-/// downloads cannot continue in the background at all.
+/// screen is off. Other platforms only get a completion notification.
 class DownloadNotificationService {
   DownloadNotificationService(this._manager);
 
@@ -30,41 +28,38 @@ class DownloadNotificationService {
   bool _wasBusy = false;
   bool _initialized = false;
 
-  static bool get _supported =>
-      !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  static bool get _supported => !kIsWeb && Platform.isAndroid;
 
   Future<void> init() async {
     if (!_supported || _initialized) return;
-    await _plugin.initialize(const InitializationSettings(
-      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-      iOS: DarwinInitializationSettings(),
-    ));
-    if (Platform.isAndroid) {
-      // Android 13+ runtime permission for posting notifications.
-      await _plugin
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
-          ?.requestNotificationsPermission();
-    } else if (Platform.isIOS) {
-      await _plugin
-          .resolvePlatformSpecificImplementation<
-              IOSFlutterLocalNotificationsPlugin>()
-          ?.requestPermissions(alert: true, badge: true);
-    }
+    await _plugin.initialize(
+      const InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      ),
+    );
+    // Android 13+ runtime permission for posting notifications.
+    await _plugin
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.requestNotificationsPermission();
     _initialized = true;
     _manager.addListener(_onManagerChanged);
     _onManagerChanged();
   }
 
   void _onManagerChanged() {
-    final busy = _manager.tasks
-        .any((t) => t.isActive || t.status == DownloadStatus.queued);
+    final busy = _manager.tasks.any(
+      (t) => t.isActive || t.status == DownloadStatus.queued,
+    );
     if (busy) {
       _wasBusy = true;
       // Progress ticks only on Android where the foreground service lives.
       if (Platform.isAndroid && _timer == null) {
         _timer = Timer.periodic(
-            const Duration(seconds: 1), (_) => _updateProgress());
+          const Duration(seconds: 1),
+          (_) => _updateProgress(),
+        );
         _updateProgress();
       }
     } else if (_wasBusy) {
@@ -98,13 +93,14 @@ class DownloadNotificationService {
     );
     await _plugin
         .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
+          AndroidFlutterLocalNotificationsPlugin
+        >()
         ?.startForegroundService(
           _progressId,
           '正在下载（$percent%）',
           '${formatBytes(received)} / ${formatBytes(total)}'
-          ' · ${formatSpeed(_manager.totalSpeed)}'
-          ' · 剩余 ${formatEta(total - received, _manager.totalSpeed)}',
+              ' · ${formatSpeed(_manager.totalSpeed)}'
+              ' · 剩余 ${formatEta(total - received, _manager.totalSpeed)}',
           notificationDetails: details,
           foregroundServiceTypes: {
             AndroidServiceForegroundType.foregroundServiceTypeDataSync,
@@ -116,7 +112,8 @@ class DownloadNotificationService {
     if (Platform.isAndroid) {
       await _plugin
           .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
+            AndroidFlutterLocalNotificationsPlugin
+          >()
           ?.stopForegroundService();
     }
   }
@@ -137,7 +134,6 @@ class DownloadNotificationService {
         importance: Importance.high,
         priority: Priority.high,
       ),
-      iOS: DarwinNotificationDetails(),
     );
     await _plugin.show(
       _doneId,

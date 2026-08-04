@@ -49,7 +49,8 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<bool> _isWritable(String dir) async {
     try {
       final probe = File(
-          '$dir/.hoyo_write_test_${DateTime.now().millisecondsSinceEpoch}');
+        '$dir/.hoyo_write_test_${DateTime.now().millisecondsSinceEpoch}',
+      );
       await probe.writeAsString('ok');
       await probe.delete();
       return true;
@@ -74,15 +75,11 @@ class _SettingsPageState extends State<SettingsPage> {
       );
       if (path == null) return; // user canceled
       if (!await _isWritable(path)) {
-        messenger.showSnackBar(
-          SnackBar(content: Text('该目录不可写入：$path')),
-        );
+        messenger.showSnackBar(SnackBar(content: Text('该目录不可写入：$path')));
         return;
       }
       await settings.setDownloadDir(path);
-      messenger.showSnackBar(
-        SnackBar(content: Text('下载目录已设置为：$path')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('下载目录已设置为：$path')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -102,8 +99,7 @@ class _SettingsPageState extends State<SettingsPage> {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-            child: Text('下载目录',
-                style: Theme.of(context).textTheme.titleSmall),
+            child: Text('下载目录', style: Theme.of(context).textTheme.titleSmall),
           ),
           FutureBuilder<String>(
             future: settings.resolveDownloadDir(),
@@ -111,9 +107,9 @@ class _SettingsPageState extends State<SettingsPage> {
               return ListTile(
                 leading: const Icon(Icons.folder),
                 title: Text(snapshot.data ?? '...'),
-                subtitle: Text(settings.customDownloadDir == null
-                    ? '默认（应用私有目录）'
-                    : '自定义目录'),
+                subtitle: Text(
+                  settings.customDownloadDir == null ? '默认（应用私有目录）' : '自定义目录',
+                ),
               );
             },
           ),
@@ -128,8 +124,9 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 const SizedBox(width: 12),
                 TextButton(
-                  onPressed:
-                      settings.customDownloadDir == null ? null : _resetDirectory,
+                  onPressed: settings.customDownloadDir == null
+                      ? null
+                      : _resetDirectory,
                   child: const Text('恢复默认'),
                 ),
               ],
@@ -140,16 +137,14 @@ class _SettingsPageState extends State<SettingsPage> {
             child: Text(
               '提示：\n'
               '• Android 上写入 SD 卡 / U 盘（OTG）需要授予“所有文件访问权限”。\n'
-              '• 更改目录只影响之后新添加的任务，进行中的任务仍写入原目录。\n'
-              '• iOS 仅支持应用内目录。',
+              '• 更改目录只影响之后新添加的任务，进行中的任务仍写入原目录。',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ),
           const Divider(),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: Text('下载参数',
-                style: Theme.of(context).textTheme.titleSmall),
+            child: Text('下载参数', style: Theme.of(context).textTheme.titleSmall),
           ),
           ListTile(
             leading: const Icon(Icons.dynamic_feed),
