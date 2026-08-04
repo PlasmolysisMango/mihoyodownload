@@ -39,10 +39,16 @@ class _PackagePageState extends State<PackagePage> {
 
   Future<_PackageData> _loadData() async {
     final client = context.read<HoYoPlayApiClient>();
-    final packageFuture = client.getGamePackage(widget.region, widget.game.gameId);
+    final packageFuture = client.getGamePackage(
+      widget.region,
+      widget.game.gameId,
+    );
     SophonBuild? build;
     try {
-      final branch = await client.getGameBranch(widget.region, widget.game.gameId);
+      final branch = await client.getGameBranch(
+        widget.region,
+        widget.game.gameId,
+      );
       if (branch != null && branch.main.packageId.isNotEmpty) {
         build = await client.getSophonChunkBuild(
           widget.region,
@@ -68,13 +74,15 @@ class _PackagePageState extends State<PackagePage> {
   void _initSophonSelection(List<SophonManifestMeta> manifests) {
     if (_initializedSophonSelection) return;
     _initializedSophonSelection = true;
-    for (final meta in manifests) {
-      if (meta.matchingField == 'game') {
-        _selectedCategoryIds.add(meta.categoryId);
-      }
+    final groups = groupSophonManifests(manifests);
+    final gameGroup = groups.where((g) => g.kind == SophonCategoryKind.game);
+    for (final group in gameGroup) {
+      _selectedCategoryIds.addAll(group.manifests.map((m) => m.categoryId));
     }
-    if (_selectedCategoryIds.isEmpty && manifests.isNotEmpty) {
-      _selectedCategoryIds.add(manifests.first.categoryId);
+    if (_selectedCategoryIds.isEmpty && groups.isNotEmpty) {
+      _selectedCategoryIds.addAll(
+        groups.first.manifests.map((m) => m.categoryId),
+      );
     }
   }
 
@@ -158,23 +166,41 @@ class _PackagePageState extends State<PackagePage> {
   }
 
   Widget _buildSophonMode(SophonBuild build, bool canFallback) {
+    final groups = groupSophonManifests(build.manifests);
+    final gameGroups = groups.where((g) => g.kind == SophonCategoryKind.game);
+    final audioGroups = groups.where((g) => g.kind == SophonCategoryKind.audio);
+    final otherGroups = groups.where((g) => g.kind == SophonCategoryKind.other);
     final selected = build.manifests
         .where((m) => _selectedCategoryIds.contains(m.categoryId))
         .toList();
-    final selectedSize =
-        selected.fold<int>(0, (sum, m) => sum + m.compressedSize);
+    final selectedSize = selected.fold<int>(
+      0,
+      (sum, m) => sum + m.compressedSize,
+    );
+    final selectedGroupCount = groups
+        .where(
+          (g) => g.manifests.any(
+            (m) => _selectedCategoryIds.contains(m.categoryId),
+          ),
+        )
+        .length;
     return Column(
       children: [
         _modeBanner(
           title: 'Chunk 模式（推荐）',
-          subtitle: '按官方小块下载与校验，坏块只重下单个 chunk。',
+          subtitle: '按官方小块下载与校验；界面已聚合为游戏资源和语音包。',
           canSwitch: canFallback,
         ),
         Expanded(
           child: ListView(
             children: [
-              _sectionHeader(context, '资源分类 v${build.tag}'),
-              for (final meta in build.manifests) _sophonTile(meta),
+              _sophonSelectionActions(build.manifests),
+              if (gameGroups.isNotEmpty) _sectionHeader(context, '游戏资源'),
+              for (final group in gameGroups) _sophonGroupTile(group),
+              if (audioGroups.isNotEmpty) _sectionHeader(context, '语音包（可选）'),
+              for (final group in audioGroups) _sophonGroupTile(group),
+              if (otherGroups.isNotEmpty) _sectionHeader(context, '其他'),
+              for (final group in otherGroups) _sophonGroupTile(group),
             ],
           ),
         ),
@@ -185,7 +211,7 @@ class _PackagePageState extends State<PackagePage> {
               children: [
                 Expanded(
                   child: Text(
-                    '已选 ${selected.length} 个分类\n约 ${formatBytes(selectedSize)}',
+                    '已选 $selectedGroupCount 个资源组 / ${selected.length} 个分类\n约 ${formatBytes(selectedSize)}',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 ),
@@ -210,7 +236,10 @@ class _PackagePageState extends State<PackagePage> {
     );
   }
 
-  Widget _buildPackageMode(GamePackageResource resource, bool canSwitchToChunk) {
+  Widget _buildPackageMode(
+    GamePackageResource resource,
+    bool canSwitchToChunk,
+  ) {
     return Column(
       children: [
         _modeBanner(
@@ -221,8 +250,10 @@ class _PackagePageState extends State<PackagePage> {
         Expanded(
           child: ListView(
             children: [
-              _sectionHeader(context,
-                  '游戏本体 v${resource.version}（${resource.gamePackages.length} 个分卷）'),
+              _sectionHeader(
+                context,
+                '游戏本体 v${resource.version}（${resource.gamePackages.length} 个分卷）',
+              ),
               for (final file in resource.gamePackages) _fileTile(file),
               if (resource.audioPackages.isNotEmpty)
                 _sectionHeader(context, '语音包（可选）'),
@@ -284,25 +315,89 @@ class _PackagePageState extends State<PackagePage> {
     );
   }
 
-  Widget _sophonTile(SophonManifestMeta meta) {
-    return CheckboxListTile(
-      value: _selectedCategoryIds.contains(meta.categoryId),
-      dense: true,
-      title: Text(meta.displayName, overflow: TextOverflow.ellipsis),
-      subtitle: Text(
-        '${meta.matchingField} · ${formatBytes(meta.compressedSize)} · '
-        '${meta.fileCount} 文件 / ${meta.chunkCount} chunks',
+  Widget _sophonSelectionActions(List<SophonManifestMeta> manifests) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          OutlinedButton.icon(
+            onPressed: () => setState(() {
+              _selectedCategoryIds.addAll(manifests.map((m) => m.categoryId));
+            }),
+            icon: const Icon(Icons.select_all),
+            label: const Text('全选'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => setState(_selectedCategoryIds.clear),
+            icon: const Icon(Icons.deselect),
+            label: const Text('全不选'),
+          ),
+        ],
       ),
-      onChanged: (checked) {
-        setState(() {
-          if (checked == true) {
-            _selectedCategoryIds.add(meta.categoryId);
-          } else {
-            _selectedCategoryIds.remove(meta.categoryId);
-          }
-        });
-      },
     );
+  }
+
+  Widget _sophonGroupTile(SophonCategoryGroup group) {
+    final selectedCount = group.manifests
+        .where((m) => _selectedCategoryIds.contains(m.categoryId))
+        .length;
+    final checked = selectedCount == 0
+        ? false
+        : selectedCount == group.manifests.length
+        ? true
+        : null;
+    return ExpansionTile(
+      leading: Checkbox(
+        value: checked,
+        tristate: true,
+        onChanged: (_) => _toggleSophonGroup(group),
+      ),
+      title: Text(group.title, overflow: TextOverflow.ellipsis),
+      subtitle: Text(
+        '${group.manifests.length} 个分类 · ${formatBytes(group.compressedSize)} · '
+        '${group.fileCount} 文件 / ${group.chunkCount} chunks',
+      ),
+      children: [
+        for (final meta in group.manifests)
+          ListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.only(left: 72, right: 16),
+            title: Text(
+              _sophonOriginalTitle(meta),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              '${meta.matchingField} · ${formatBytes(meta.compressedSize)} · '
+              '${meta.fileCount} 文件 / ${meta.chunkCount} chunks',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+    );
+  }
+
+  String _sophonOriginalTitle(SophonManifestMeta meta) {
+    if (meta.displayName.trim().isNotEmpty) return meta.displayName;
+    return meta.categoryId;
+  }
+
+  void _toggleSophonGroup(SophonCategoryGroup group) {
+    final allSelected = group.manifests.every(
+      (m) => _selectedCategoryIds.contains(m.categoryId),
+    );
+    setState(() {
+      for (final meta in group.manifests) {
+        if (allSelected) {
+          _selectedCategoryIds.remove(meta.categoryId);
+        } else {
+          _selectedCategoryIds.add(meta.categoryId);
+        }
+      }
+    });
   }
 
   Widget _fileTile(GamePackageFile file, {String? subtitlePrefix}) {

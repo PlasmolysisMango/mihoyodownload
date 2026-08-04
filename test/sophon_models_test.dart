@@ -5,6 +5,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hoyo_downloader/models/sophon_models.dart';
 
 void main() {
+  SophonManifestMeta meta(
+    String id,
+    String matchingField, {
+    String categoryName = '',
+    int size = 10,
+  }) {
+    return SophonManifestMeta(
+      categoryId: id,
+      categoryName: categoryName,
+      matchingField: matchingField,
+      manifestId: 'manifest_$id',
+      manifestChecksum: '',
+      manifestCompressedSize: 0,
+      manifestUncompressedSize: 0,
+      manifestUrlPrefix: 'https://example.com/manifests',
+      manifestUrlSuffix: '',
+      chunkUrlPrefix: 'https://example.com/chunks',
+      chunkUrlSuffix: '',
+      compressedSize: size,
+      uncompressedSize: size * 2,
+      fileCount: 1,
+      chunkCount: 2,
+    );
+  }
+
   List<int> varint(int value) {
     final out = <int>[];
     var v = value;
@@ -19,15 +44,15 @@ void main() {
   }
 
   List<int> fieldVarint(int number, int value) => [
-        ...varint(number << 3),
-        ...varint(value),
-      ];
+    ...varint(number << 3),
+    ...varint(value),
+  ];
 
   List<int> fieldBytes(int number, List<int> value) => [
-        ...varint((number << 3) | 2),
-        ...varint(value.length),
-        ...value,
-      ];
+    ...varint((number << 3) | 2),
+    ...varint(value.length),
+    ...value,
+  ];
 
   List<int> fieldString(int number, String value) =>
       fieldBytes(number, utf8.encode(value));
@@ -69,27 +94,49 @@ void main() {
   });
 
   test('SophonManifestMeta builds display names and URLs', () {
-    const meta = SophonManifestMeta(
-      categoryId: '100',
-      categoryName: 'null',
-      matchingField: 'game',
-      manifestId: 'manifest_id',
-      manifestChecksum: 'abc',
-      manifestCompressedSize: 1,
-      manifestUncompressedSize: 2,
-      manifestUrlPrefix: 'https://example.com/manifests/',
-      manifestUrlSuffix: '?x=1',
-      chunkUrlPrefix: 'https://example.com/chunks',
-      chunkUrlSuffix: '',
-      compressedSize: 3,
-      uncompressedSize: 4,
-      fileCount: 5,
-      chunkCount: 6,
-    );
+    final item = meta('100', 'game', categoryName: 'null', size: 3);
 
-    expect(meta.displayName, '游戏资源');
-    expect(meta.manifestUrl, 'https://example.com/manifests/manifest_id?x=1');
-    expect(meta.chunkUrl('chunk_id'), 'https://example.com/chunks/chunk_id');
-    expect(SophonManifestMeta.fromPersistedJson(meta.toJson()).chunkCount, 6);
+    expect(item.displayName, '游戏资源');
+    expect(item.manifestUrl, 'https://example.com/manifests/manifest_100');
+    expect(item.chunkUrl('chunk_id'), 'https://example.com/chunks/chunk_id');
+    expect(SophonManifestMeta.fromPersistedJson(item.toJson()).chunkCount, 2);
   });
+
+  test(
+    'groups Sophon manifests into game resource and language audio packs',
+    () {
+      final groups = groupSophonManifests([
+        meta('game_a', 'game', size: 100),
+        meta('game_b', 'game_patch', size: 50),
+        meta('zh_a', 'audio_zh-cn', size: 20),
+        meta('zh_b', 'voice_cn_extra', categoryName: '中文语音', size: 30),
+        meta('ja_a', 'ja-jp', size: 40),
+        meta('ko_a', 'audio_korean', size: 60),
+        meta('other_a', 'audio_extra', size: 70),
+      ]);
+
+      expect(groups.map((g) => g.title), [
+        '游戏资源',
+        '中文语音包',
+        '日文语音包',
+        '韩文语音包',
+        '其他',
+      ]);
+      expect(groups.first.kind, SophonCategoryKind.game);
+      expect(groups.first.manifests.map((m) => m.categoryId), [
+        'game_a',
+        'game_b',
+      ]);
+      final zh = groups.firstWhere((g) => g.title == '中文语音包');
+      expect(zh.kind, SophonCategoryKind.audio);
+      expect(zh.languageCode, 'zh-cn');
+      expect(zh.compressedSize, 50);
+      expect(zh.fileCount, 2);
+      expect(zh.chunkCount, 4);
+      final other = groups.firstWhere((g) => g.title == '其他');
+      expect(other.kind, SophonCategoryKind.other);
+      expect(other.languageCode, isNull);
+      expect(other.manifests.single.categoryId, 'other_a');
+    },
+  );
 }

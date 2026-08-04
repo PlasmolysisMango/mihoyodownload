@@ -14,7 +14,8 @@ class GameBranch {
     return GameBranch(
       gameId: GameId.fromJson(json['game'] as Map<String, dynamic>),
       main: GameBranchPackage.fromJson(
-          json['main'] as Map<String, dynamic>? ?? const {}),
+        json['main'] as Map<String, dynamic>? ?? const {},
+      ),
     );
   }
 }
@@ -139,27 +140,29 @@ class SophonManifestMeta {
     return '资源 $matchingField';
   }
 
-  String get manifestUrl => _joinUrl(manifestUrlPrefix, manifestId, manifestUrlSuffix);
+  String get manifestUrl =>
+      _joinUrl(manifestUrlPrefix, manifestId, manifestUrlSuffix);
 
-  String chunkUrl(String chunkId) => _joinUrl(chunkUrlPrefix, chunkId, chunkUrlSuffix);
+  String chunkUrl(String chunkId) =>
+      _joinUrl(chunkUrlPrefix, chunkId, chunkUrlSuffix);
 
   Map<String, dynamic> toJson() => {
-        'categoryId': categoryId,
-        'categoryName': categoryName,
-        'matchingField': matchingField,
-        'manifestId': manifestId,
-        'manifestChecksum': manifestChecksum,
-        'manifestCompressedSize': manifestCompressedSize,
-        'manifestUncompressedSize': manifestUncompressedSize,
-        'manifestUrlPrefix': manifestUrlPrefix,
-        'manifestUrlSuffix': manifestUrlSuffix,
-        'chunkUrlPrefix': chunkUrlPrefix,
-        'chunkUrlSuffix': chunkUrlSuffix,
-        'compressedSize': compressedSize,
-        'uncompressedSize': uncompressedSize,
-        'fileCount': fileCount,
-        'chunkCount': chunkCount,
-      };
+    'categoryId': categoryId,
+    'categoryName': categoryName,
+    'matchingField': matchingField,
+    'manifestId': manifestId,
+    'manifestChecksum': manifestChecksum,
+    'manifestCompressedSize': manifestCompressedSize,
+    'manifestUncompressedSize': manifestUncompressedSize,
+    'manifestUrlPrefix': manifestUrlPrefix,
+    'manifestUrlSuffix': manifestUrlSuffix,
+    'chunkUrlPrefix': chunkUrlPrefix,
+    'chunkUrlSuffix': chunkUrlSuffix,
+    'compressedSize': compressedSize,
+    'uncompressedSize': uncompressedSize,
+    'fileCount': fileCount,
+    'chunkCount': chunkCount,
+  };
 
   factory SophonManifestMeta.fromPersistedJson(Map<String, dynamic> json) {
     return SophonManifestMeta(
@@ -187,7 +190,8 @@ class SophonManifestMeta {
         json['manifest_download'] as Map<String, dynamic>? ?? const {};
     final chunkDownload =
         json['chunk_download'] as Map<String, dynamic>? ?? const {};
-    final stats = json['deduplicated_stats'] as Map<String, dynamic>? ??
+    final stats =
+        json['deduplicated_stats'] as Map<String, dynamic>? ??
         json['stats'] as Map<String, dynamic>? ??
         const {};
     return SophonManifestMeta(
@@ -209,6 +213,171 @@ class SophonManifestMeta {
     );
   }
 }
+
+enum SophonCategoryKind { game, audio, other }
+
+class SophonCategoryGroup {
+  const SophonCategoryGroup({
+    required this.key,
+    required this.kind,
+    required this.title,
+    required this.manifests,
+    this.languageCode,
+  });
+
+  final String key;
+  final SophonCategoryKind kind;
+  final String title;
+  final String? languageCode;
+  final List<SophonManifestMeta> manifests;
+
+  int get compressedSize =>
+      manifests.fold(0, (sum, meta) => sum + meta.compressedSize);
+
+  int get fileCount => manifests.fold(0, (sum, meta) => sum + meta.fileCount);
+
+  int get chunkCount => manifests.fold(0, (sum, meta) => sum + meta.chunkCount);
+}
+
+List<SophonCategoryGroup> groupSophonManifests(
+  Iterable<SophonManifestMeta> manifests,
+) {
+  final game = <SophonManifestMeta>[];
+  final audio = <String, List<SophonManifestMeta>>{};
+  final other = <SophonManifestMeta>[];
+
+  for (final meta in manifests) {
+    if (_isGameManifest(meta)) {
+      game.add(meta);
+    } else {
+      final language = _detectAudioLanguage(meta);
+      if (language == null) {
+        other.add(meta);
+      } else {
+        audio.putIfAbsent(language, () => []).add(meta);
+      }
+    }
+  }
+
+  final groups = <SophonCategoryGroup>[];
+  if (game.isNotEmpty) {
+    groups.add(
+      SophonCategoryGroup(
+        key: 'game',
+        kind: SophonCategoryKind.game,
+        title: '游戏资源',
+        manifests: game,
+      ),
+    );
+  }
+
+  final audioEntries = audio.entries.toList()
+    ..sort(
+      (a, b) => _languageSortKey(a.key).compareTo(_languageSortKey(b.key)),
+    );
+  for (final entry in audioEntries) {
+    groups.add(
+      SophonCategoryGroup(
+        key: 'audio:${entry.key}',
+        kind: SophonCategoryKind.audio,
+        title: '${_languageDisplayName(entry.key)}语音包',
+        languageCode: entry.key,
+        manifests: entry.value,
+      ),
+    );
+  }
+  if (other.isNotEmpty) {
+    groups.add(
+      SophonCategoryGroup(
+        key: 'other',
+        kind: SophonCategoryKind.other,
+        title: '其他',
+        manifests: other,
+      ),
+    );
+  }
+
+  return groups;
+}
+
+bool _isGameManifest(SophonManifestMeta meta) {
+  final text = _normalizeToken('${meta.matchingField} ${meta.categoryName}');
+  return text == 'game' || text.contains('game');
+}
+
+String? _detectAudioLanguage(SophonManifestMeta meta) {
+  final text = _normalizeToken('${meta.matchingField} ${meta.categoryName}');
+  final aliases = <String, List<String>>{
+    'zh-cn': [
+      'zhcn',
+      'zh_cn',
+      'zh-cn',
+      'cn',
+      'chinese',
+      'mandarin',
+      '简体',
+      '中文',
+    ],
+    'zh-tw': ['zhtw', 'zh_tw', 'zh-tw', 'zhhk', 'zh_hk', 'zh-hk', '繁体'],
+    'ja-jp': ['jajp', 'ja_jp', 'ja-jp', 'jp', 'japanese', '日文', '日语'],
+    'ko-kr': ['kokr', 'ko_kr', 'ko-kr', 'kr', 'korean', '韩文', '韩语'],
+    'en-us': ['enus', 'en_us', 'en-us', 'en', 'english', '英文', '英语'],
+    'fr-fr': ['frfr', 'fr_fr', 'fr-fr', 'fr', 'french'],
+    'de-de': ['dede', 'de_de', 'de-de', 'de', 'german'],
+    'es-es': ['eses', 'es_es', 'es-es', 'es', 'spanish'],
+    'ru-ru': ['ruru', 'ru_ru', 'ru-ru', 'ru', 'russian'],
+    'th-th': ['thth', 'th_th', 'th-th', 'th', 'thai'],
+    'vi-vn': ['vivn', 'vi_vn', 'vi-vn', 'vi', 'vietnamese'],
+    'id-id': ['idid', 'id_id', 'id-id', 'id', 'indonesian'],
+    'pt-pt': ['ptpt', 'pt_pt', 'pt-pt', 'pt', 'portuguese'],
+  };
+  for (final entry in aliases.entries) {
+    if (entry.value.any(text.contains)) return entry.key;
+  }
+  return null;
+}
+
+String _languageDisplayName(String code) {
+  return switch (code) {
+    'zh-cn' => '中文',
+    'zh-tw' => '繁体中文',
+    'ja-jp' => '日文',
+    'ko-kr' => '韩文',
+    'en-us' => '英文',
+    'fr-fr' => '法文',
+    'de-de' => '德文',
+    'es-es' => '西班牙文',
+    'ru-ru' => '俄文',
+    'th-th' => '泰文',
+    'vi-vn' => '越南文',
+    'id-id' => '印尼文',
+    'pt-pt' => '葡萄牙文',
+    _ => '其他',
+  };
+}
+
+int _languageSortKey(String code) {
+  const order = [
+    'zh-cn',
+    'zh-tw',
+    'ja-jp',
+    'ko-kr',
+    'en-us',
+    'fr-fr',
+    'de-de',
+    'es-es',
+    'ru-ru',
+    'th-th',
+    'vi-vn',
+    'id-id',
+    'pt-pt',
+    'unknown',
+  ];
+  final index = order.indexOf(code);
+  return index < 0 ? order.length : index;
+}
+
+String _normalizeToken(String value) => value.toLowerCase().replaceAll(' ', '');
 
 class SophonChunkManifest {
   const SophonChunkManifest({required this.files});
@@ -390,7 +559,9 @@ String _utf8(Object value) {
 }
 
 String _joinUrl(String prefix, String value, String suffix) {
-  final p = prefix.endsWith('/') ? prefix.substring(0, prefix.length - 1) : prefix;
+  final p = prefix.endsWith('/')
+      ? prefix.substring(0, prefix.length - 1)
+      : prefix;
   return '$p/$value$suffix';
 }
 
