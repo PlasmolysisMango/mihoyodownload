@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -9,6 +10,21 @@ import 'format.dart';
 class DownloadsPage extends StatelessWidget {
   const DownloadsPage({super.key});
 
+  Future<void> _loadTaskRecords(BuildContext context) async {
+    final manager = context.read<DownloadManager>();
+    final messenger = ScaffoldMessenger.of(context);
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择包含任务记录的下载目录',
+    );
+    if (path == null) return;
+    final count = await manager.importTaskRecordsFromDirectory(path);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(count == 0 ? '未找到可载入的任务记录' : '已载入 $count 个下载任务'),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final manager = context.watch<DownloadManager>();
@@ -17,6 +33,11 @@ class DownloadsPage extends StatelessWidget {
       appBar: AppBar(
         title: const Text('下载管理'),
         actions: [
+          IconButton(
+            tooltip: '载入任务记录',
+            onPressed: () => _loadTaskRecords(context),
+            icon: const Icon(Icons.drive_folder_upload),
+          ),
           IconButton(
             tooltip: '全部暂停',
             onPressed: manager.pauseAll,
@@ -50,6 +71,11 @@ class DownloadsPage extends StatelessWidget {
             ),
     );
   }
+}
+
+enum _TaskMenuAction {
+  removeRecord,
+  removeTaskAndFiles,
 }
 
 class _TotalBar extends StatelessWidget {
@@ -118,13 +144,20 @@ class _TaskTile extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _actionButton(),
-          IconButton(
-            tooltip: '取消',
-            icon: const Icon(Icons.close),
-            onPressed: task.status == DownloadStatus.completed ||
-                    task.status == DownloadStatus.canceled
-                ? null
-                : () => manager.cancel(task),
+          PopupMenuButton<_TaskMenuAction>(
+            tooltip: '任务操作',
+            icon: const Icon(Icons.more_vert),
+            onSelected: (value) => _handleMenuAction(context, value),
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: _TaskMenuAction.removeRecord,
+                child: Text('仅删除任务'),
+              ),
+              PopupMenuItem(
+                value: _TaskMenuAction.removeTaskAndFiles,
+                child: Text('删除任务和文件'),
+              ),
+            ],
           ),
         ],
       ),
@@ -159,6 +192,35 @@ class _TaskTile extends StatelessWidget {
           onPressed: null,
         );
     }
+  }
+
+  Future<void> _handleMenuAction(
+    BuildContext context,
+    _TaskMenuAction action,
+  ) async {
+    if (action == _TaskMenuAction.removeTaskAndFiles) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('删除任务和文件？'),
+          content: Text('将删除“${task.displayName}”的任务记录、已下载文件和临时缓存。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('删除'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      await manager.removeTask(task, deleteFiles: true);
+      return;
+    }
+    await manager.removeTask(task);
   }
 
   String _statusText(DownloadJob task) {

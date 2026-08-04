@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -119,6 +120,82 @@ void main() {
     expect(sophonTask.status, DownloadStatus.paused);
     expect(sophonTask.totalSize, 10);
     expect(sophonTask.savePath, '${tempDir.path}/game');
+  });
+
+  test('writes portable task records and imports them from copied directory',
+      () async {
+    final prefs = await SharedPreferences.getInstance();
+    final mobileDir = '${tempDir.path}/mobile/Game_1.0';
+    final m1 = DownloadManager(maxConcurrent: 0, prefs: prefs);
+    m1.addPackageFiles(
+      groupName: 'Game 1.0',
+      saveDir: mobileDir,
+      files: [file('a.zip')],
+    );
+
+    final record = File(
+        '$mobileDir/${DownloadManager.portableTaskRecordFileName}');
+    expect(await record.exists(), isTrue);
+    final exported = jsonDecode(await record.readAsString()) as Map<String, dynamic>;
+    final tasks = exported['tasks'] as List<dynamic>;
+    expect((tasks.single as Map<String, dynamic>)['savePath'], 'a.zip');
+
+    final pcDir = '${tempDir.path}/pc/Game_1.0';
+    await Directory(pcDir).create(recursive: true);
+    await File('$pcDir/${DownloadManager.portableTaskRecordFileName}')
+        .writeAsString(await record.readAsString());
+
+    final m2 = DownloadManager(maxConcurrent: 0);
+    final added = await m2.importTaskRecordsFromDirectory('${tempDir.path}/pc');
+
+    expect(added, 1);
+    expect(m2.tasks.single.displayName, 'a.zip');
+    expect(m2.tasks.single.savePath, '$pcDir/a.zip');
+    expect(m2.tasks.single.status, DownloadStatus.paused);
+  });
+
+  test('removeTask can keep downloaded files while deleting only the record',
+      () async {
+    final manager = DownloadManager(maxConcurrent: 0);
+    manager.addPackageFiles(
+      groupName: 'Game 1.0',
+      saveDir: tempDir.path,
+      files: [file('a.zip')],
+    );
+    final finalFile = File('${tempDir.path}/a.zip');
+    final tmpFile = File('${tempDir.path}/a.zip_tmp');
+    await finalFile.writeAsBytes([1, 2, 3]);
+    await tmpFile.writeAsBytes([4, 5, 6]);
+
+    await manager.removeTask(manager.tasks.single);
+
+    expect(manager.tasks, isEmpty);
+    expect(await finalFile.exists(), isTrue);
+    expect(await tmpFile.exists(), isTrue);
+    expect(
+      await File('${tempDir.path}/${DownloadManager.portableTaskRecordFileName}')
+          .exists(),
+      isFalse,
+    );
+  });
+
+  test('removeTask can delete both task record and files', () async {
+    final manager = DownloadManager(maxConcurrent: 0);
+    manager.addPackageFiles(
+      groupName: 'Game 1.0',
+      saveDir: tempDir.path,
+      files: [file('a.zip')],
+    );
+    final finalFile = File('${tempDir.path}/a.zip');
+    final tmpFile = File('${tempDir.path}/a.zip_tmp');
+    await finalFile.writeAsBytes([1, 2, 3]);
+    await tmpFile.writeAsBytes([4, 5, 6]);
+
+    await manager.removeTask(manager.tasks.single, deleteFiles: true);
+
+    expect(manager.tasks, isEmpty);
+    expect(await finalFile.exists(), isFalse);
+    expect(await tmpFile.exists(), isFalse);
   });
 
   test('maxConcurrent is adjustable at runtime and clamped', () {
