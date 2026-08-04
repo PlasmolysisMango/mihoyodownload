@@ -1,6 +1,10 @@
 # Uncomment this line to define a global platform for your project
 platform :ios, '13.0'
 
+# Swift pods such as DKPhotoGallery need module maps for transitive Objective-C
+# dependencies (for example SDWebImage) when CocoaPods integrates static libs.
+use_modular_headers!
+
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 
