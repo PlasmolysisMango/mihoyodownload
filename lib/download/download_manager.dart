@@ -421,10 +421,13 @@ class DownloadManager extends ChangeNotifier {
       } else if (task is DownloadTask &&
           task.cacheDir != null &&
           task.cacheDir!.isNotEmpty) {
+        final markerPath = task.validatedCacheMarkerPath;
         if (task.isActive) {
           activePaths.add(_normalizedPath(task.tmpPath));
+          if (markerPath != null) activePaths.add(_normalizedPath(markerPath));
         } else {
           cachePaths.add(task.tmpPath);
+          if (markerPath != null) cachePaths.add(markerPath);
         }
       }
     }
@@ -476,6 +479,11 @@ class DownloadManager extends ChangeNotifier {
         if (await finalFile.exists()) await finalFile.delete();
         final tmpFile = File(task.tmpPath);
         if (await tmpFile.exists()) await tmpFile.delete();
+        final markerPath = task.validatedCacheMarkerPath;
+        if (markerPath != null) {
+          final marker = File(markerPath);
+          if (await marker.exists()) await marker.delete();
+        }
       } else if (task is SophonDownloadTask) {
         final target = Directory(task.savePath);
         if (await target.exists()) await target.delete(recursive: true);

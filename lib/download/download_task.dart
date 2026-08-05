@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:convert/convert.dart';
@@ -80,6 +81,13 @@ class DownloadTask extends DownloadJob {
     return '$root/$key-$name.tmp';
   }
 
+  /// Sidecar marker written only after the cache tmp file passed verification.
+  String? get validatedCacheMarkerPath {
+    final root = cacheDir;
+    if (root == null || root.isEmpty) return null;
+    return '$tmpPath.verified';
+  }
+
   String get _tmpPath => tmpPath;
 
   @override
@@ -117,12 +125,22 @@ class DownloadTask extends DownloadJob {
       int start = await tmpFile.exists() ? await tmpFile.length() : 0;
       if (start > totalSize) {
         // Corrupted tmp file, restart from scratch.
+        await _clearValidatedCacheMarker();
         await tmpFile.delete();
         start = 0;
       }
       _receivedBytes = start;
 
+      if (await _hasValidatedCache(tmpFile)) {
+        _receivedBytes = totalSize;
+        _setStatus(DownloadStatus.verifying);
+        await _publishCompletedFile(tmpFile);
+        _setStatus(DownloadStatus.completed);
+        return true;
+      }
+
       if (start < totalSize) {
+        await _clearValidatedCacheMarker();
         await _downloadRange(tmpFile, start);
         if (_abortRequested) {
           _setStatus(DownloadStatus.paused);
@@ -132,11 +150,13 @@ class DownloadTask extends DownloadJob {
 
       _setStatus(DownloadStatus.verifying);
       if (await _verifyMd5(tmpFile)) {
+        await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
         _setStatus(DownloadStatus.completed);
         return true;
       } else {
         // Drop the corrupted tmp so the next attempt restarts from byte 0.
+        await _clearValidatedCacheMarker();
         await tmpFile.delete();
         _receivedBytes = 0;
         if (!_abortRequested) {
@@ -210,6 +230,7 @@ class DownloadTask extends DownloadJob {
       _setStatus(DownloadStatus.downloading);
       final tmpFile = File(_tmpPath);
       await tmpFile.parent.create(recursive: true);
+      await _clearValidatedCacheMarker();
       await _downloadRange(tmpFile, 0);
       if (_abortRequested) {
         _setStatus(DownloadStatus.paused);
@@ -217,10 +238,12 @@ class DownloadTask extends DownloadJob {
       }
       _setStatus(DownloadStatus.verifying);
       if (await _verifyMd5(tmpFile)) {
+        await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
         _setStatus(DownloadStatus.completed);
         return true;
       }
+      await _clearValidatedCacheMarker();
       await tmpFile.delete();
       _receivedBytes = 0;
       _fail('MD5 校验失败，已重试一次仍不匹配');
@@ -247,6 +270,53 @@ class DownloadTask extends DownloadJob {
     return hex.encode(output.events.single.bytes) == expectedMd5;
   }
 
+  Future<bool> _hasValidatedCache(File tmpFile) async {
+    final markerPath = validatedCacheMarkerPath;
+    if (markerPath == null) return false;
+    if (!await tmpFile.exists() || await tmpFile.length() != totalSize) {
+      return false;
+    }
+    final marker = File(markerPath);
+    if (!await marker.exists()) return false;
+    try {
+      final data = jsonDecode(await marker.readAsString());
+      if (data is! Map<String, dynamic>) return false;
+      final stat = await tmpFile.stat();
+      return data['savePath'] == savePath &&
+          data['tmpPath'] == tmpPath &&
+          data['totalSize'] == totalSize &&
+          data['expectedMd5'] == expectedMd5 &&
+          data['modifiedMillis'] == stat.modified.millisecondsSinceEpoch;
+    } catch (_) {
+      await _clearValidatedCacheMarker();
+      return false;
+    }
+  }
+
+  Future<void> _markValidatedCache() async {
+    final markerPath = validatedCacheMarkerPath;
+    if (markerPath == null) return;
+    final marker = File(markerPath);
+    final tmpStat = await File(_tmpPath).stat();
+    await marker.parent.create(recursive: true);
+    await marker.writeAsString(
+      jsonEncode({
+        'savePath': savePath,
+        'tmpPath': tmpPath,
+        'totalSize': totalSize,
+        'expectedMd5': expectedMd5,
+        'modifiedMillis': tmpStat.modified.millisecondsSinceEpoch,
+      }),
+    );
+  }
+
+  Future<void> _clearValidatedCacheMarker() async {
+    final markerPath = validatedCacheMarkerPath;
+    if (markerPath == null) return;
+    final marker = File(markerPath);
+    if (await marker.exists()) await marker.delete();
+  }
+
   Future<void> _publishCompletedFile(File tmpFile) async {
     final finalFile = File(savePath);
     await finalFile.parent.create(recursive: true);
@@ -256,6 +326,7 @@ class DownloadTask extends DownloadJob {
     }
     await tmpFile.copy(savePath);
     await tmpFile.delete();
+    await _clearValidatedCacheMarker();
   }
 
   String _fileName(String path) => path.replaceAll('\\', '/').split('/').last;
@@ -283,6 +354,7 @@ class DownloadTask extends DownloadJob {
     try {
       final tmpFile = File(_tmpPath);
       if (await tmpFile.exists()) await tmpFile.delete();
+      await _clearValidatedCacheMarker();
     } catch (_) {}
     _receivedBytes = 0;
     notifyListeners();

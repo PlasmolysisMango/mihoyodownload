@@ -128,6 +128,48 @@ void main() {
     },
   );
 
+  test(
+    'retry copies validated cache without redownloading after publish failure',
+    () async {
+      final data = randomBytes(256 * 1024);
+      final server = _RangeServer(data);
+      final uri = await server.start();
+
+      final blockedParent = '${tempDir.path}/external';
+      final savePath = '$blockedParent/file.bin';
+      final cacheDir = '${tempDir.path}/internal_cache';
+      await File(blockedParent).writeAsString('u disk unavailable');
+      final task = DownloadTask(
+        url: uri.toString(),
+        savePath: savePath,
+        totalSize: data.length,
+        expectedMd5: hex.encode(md5.convert(data).bytes),
+        displayName: 'file.bin',
+        cacheDir: cacheDir,
+      );
+
+      final firstOk = await task.run();
+
+      expect(firstOk, isFalse);
+      expect(task.status, DownloadStatus.failed);
+      expect(server.requestCount, 1);
+      expect(File(task.tmpPath).existsSync(), isTrue);
+      expect(File(task.validatedCacheMarkerPath!).existsSync(), isTrue);
+
+      await File(blockedParent).delete();
+      task.reset();
+      final secondOk = await task.run();
+
+      expect(secondOk, isTrue);
+      expect(task.status, DownloadStatus.completed);
+      expect(server.requestCount, 1);
+      expect(await File(savePath).readAsBytes(), data);
+      expect(File(task.tmpPath).existsSync(), isFalse);
+      expect(File(task.validatedCacheMarkerPath!).existsSync(), isFalse);
+      await server.stop();
+    },
+  );
+
   test('resumes from existing tmp file with Range header', () async {
     final data = randomBytes(256 * 1024);
     final server = _RangeServer(data);
