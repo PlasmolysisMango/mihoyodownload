@@ -107,6 +107,7 @@ class _PackagePageState extends State<PackagePage> {
   Future<void> _startSophonDownload(SophonBuild build) async {
     final manager = context.read<DownloadManager>();
     final client = context.read<HoYoPlayApiClient>();
+    final settings = context.read<AppSettings>();
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     final selected = build.manifests
@@ -121,10 +122,12 @@ class _PackagePageState extends State<PackagePage> {
         parsed.add((meta, manifest));
       }
       final saveDir = await _downloadSaveDir(build.tag);
+      final chunkCacheDir = settings.resolveChunkCacheDir(saveDir);
       manager.addSophonManifests(
         groupName: '${widget.game.name} ${build.tag}',
         saveDir: saveDir,
         version: build.tag,
+        chunkCacheDir: chunkCacheDir,
         manifests: parsed,
       );
       navigator.push(MaterialPageRoute(builder: (_) => const DownloadsPage()));

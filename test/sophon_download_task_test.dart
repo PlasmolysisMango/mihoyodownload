@@ -19,11 +19,17 @@ class _FakeZstdCodec implements ZstdCodec {
 }
 
 class _ChunkServer {
-  _ChunkServer(this.chunks, {this.throttle, this.chunkSize = 64 * 1024});
+  _ChunkServer(
+    this.chunks, {
+    this.throttle,
+    this.chunkSize = 64 * 1024,
+    Map<String, int>? failuresBeforeSuccess,
+  }) : failuresBeforeSuccess = failuresBeforeSuccess ?? const {};
 
   final Map<String, Uint8List> chunks;
   final Duration? throttle;
   final int chunkSize;
+  final Map<String, int> failuresBeforeSuccess;
   final Map<String, int> hits = {};
   late HttpServer _server;
 
@@ -32,6 +38,11 @@ class _ChunkServer {
     _server.listen((request) async {
       final id = request.uri.pathSegments.last;
       hits[id] = (hits[id] ?? 0) + 1;
+      if ((hits[id] ?? 0) <= (failuresBeforeSuccess[id] ?? 0)) {
+        request.response.statusCode = HttpStatus.serviceUnavailable;
+        await request.response.close();
+        return;
+      }
       final bytes = chunks[id];
       if (bytes == null) {
         request.response.statusCode = HttpStatus.notFound;
@@ -156,6 +167,106 @@ void main() {
     );
     expect(server.hits['c1'], 1);
     expect(server.hits['c2'], 1);
+    await server.stop();
+  });
+
+  test('stores large chunk cache in custom cache directory', () async {
+    final raw1 = Uint8List.fromList(List.filled(9 * 1024 * 1024, 1));
+    final (baseMeta, manifest, chunks) = await fixture(raw1Override: raw1);
+    final server = _ChunkServer(chunks);
+    final baseUrl = await server.start();
+    final cacheDir = '${tempDir.path}/fast_cache';
+    final meta = SophonManifestMeta.fromPersistedJson({
+      ...baseMeta.toJson(),
+      'chunkUrlPrefix': baseUrl.toString(),
+      'compressedSize': chunks.values.fold<int>(0, (s, b) => s + b.length),
+    });
+    final task = SophonDownloadTask(
+      meta: meta,
+      initialManifest: manifest,
+      saveDir: '${tempDir.path}/external_drive',
+      chunkCacheDir: cacheDir,
+      version: '1.0',
+      groupName: 'Test 1.0',
+      zstdCodec: const _FakeZstdCodec(),
+    );
+
+    final ok = await task.run();
+
+    expect(ok, isTrue);
+    expect(task.cacheDir, '$cacheDir/cat');
+    expect(
+      await Directory('${tempDir.path}/external_drive/.sophon').exists(),
+      isFalse,
+    );
+    await server.stop();
+  });
+
+  test('retries transient chunk download failures', () async {
+    final (baseMeta, manifest, chunks) = await fixture();
+    final server = _ChunkServer(chunks, failuresBeforeSuccess: {'c1': 1});
+    final baseUrl = await server.start();
+    final meta = SophonManifestMeta.fromPersistedJson({
+      ...baseMeta.toJson(),
+      'chunkUrlPrefix': baseUrl.toString(),
+      'compressedSize': chunks.values.fold<int>(0, (s, b) => s + b.length),
+    });
+    final task = SophonDownloadTask(
+      meta: meta,
+      initialManifest: manifest,
+      saveDir: tempDir.path,
+      version: '1.0',
+      groupName: 'Test 1.0',
+      zstdCodec: const _FakeZstdCodec(),
+    );
+
+    final ok = await task.run();
+
+    expect(ok, isTrue);
+    expect(server.hits['c1'], 2);
+    expect(
+      await File('${tempDir.path}/Game/file.txt').readAsString(),
+      'hello world',
+    );
+    await server.stop();
+  });
+
+  test('reports network speed before a chunk is fully processed', () async {
+    final raw1 = Uint8List.fromList(List.filled(768 * 1024, 1));
+    final raw2 = Uint8List.fromList(List.filled(768 * 1024, 2));
+    final (baseMeta, manifest, chunks) = await fixture(
+      raw1Override: raw1,
+      raw2Override: raw2,
+    );
+    final server = _ChunkServer(
+      chunks,
+      throttle: const Duration(milliseconds: 200),
+      chunkSize: 64 * 1024,
+    );
+    final baseUrl = await server.start();
+    final meta = SophonManifestMeta.fromPersistedJson({
+      ...baseMeta.toJson(),
+      'chunkUrlPrefix': baseUrl.toString(),
+      'compressedSize': chunks.values.fold<int>(0, (s, b) => s + b.length),
+    });
+    final task = SophonDownloadTask(
+      meta: meta,
+      initialManifest: manifest,
+      saveDir: tempDir.path,
+      version: '1.0',
+      groupName: 'Test 1.0',
+      zstdCodec: const _FakeZstdCodec(),
+    );
+
+    final run = task.run();
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (task.speed <= 0 && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+
+    expect(task.speed, greaterThan(0));
+    expect(task.receivedBytes, lessThan(meta.compressedSize));
+    expect(await run, isTrue);
     await server.stop();
   });
 

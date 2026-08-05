@@ -17,8 +17,8 @@ import 'sophon_download_task.dart';
 /// while the `_tmp` files on disk keep the resumable download progress.
 class DownloadManager extends ChangeNotifier {
   DownloadManager({int maxConcurrent = 2, SharedPreferences? prefs})
-      : _maxConcurrent = maxConcurrent,
-        _prefs = prefs;
+    : _maxConcurrent = maxConcurrent,
+      _prefs = prefs;
 
   static const _kTasksKey = 'download_tasks';
   static const portableTaskRecordFileName = '.hoyo_download_tasks.json';
@@ -64,8 +64,9 @@ class DownloadManager extends ChangeNotifier {
   }) {
     for (final file in files) {
       final savePath = '$saveDir/${file.fileName}';
-      if (_tasks.any((t) => t.savePath == savePath &&
-          t.status != DownloadStatus.canceled)) {
+      if (_tasks.any(
+        (t) => t.savePath == savePath && t.status != DownloadStatus.canceled,
+      )) {
         continue;
       }
       final task = DownloadTask(
@@ -91,11 +92,13 @@ class DownloadManager extends ChangeNotifier {
     required String saveDir,
     required String version,
     required Iterable<(SophonManifestMeta, SophonChunkManifest)> manifests,
+    String? chunkCacheDir,
   }) {
     for (final (meta, manifest) in manifests) {
       final savePath = '$saveDir/${meta.matchingField}';
-      if (_tasks.any((t) =>
-          t.savePath == savePath && t.status != DownloadStatus.canceled)) {
+      if (_tasks.any(
+        (t) => t.savePath == savePath && t.status != DownloadStatus.canceled,
+      )) {
         continue;
       }
       final task = SophonDownloadTask(
@@ -104,6 +107,7 @@ class DownloadManager extends ChangeNotifier {
         saveDir: saveDir,
         version: version,
         groupName: groupName,
+        chunkCacheDir: chunkCacheDir,
         rateLimiter: rateLimiter,
       );
       task.addListener(notifyListeners);
@@ -144,11 +148,11 @@ class DownloadManager extends ChangeNotifier {
   Future<int> importTaskRecordsFromDirectory(String dir) async {
     var added = 0;
     try {
-      await for (final entity in Directory(dir).list(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is File && _fileName(entity.path) == portableTaskRecordFileName) {
+      await for (final entity in Directory(
+        dir,
+      ).list(recursive: true, followLinks: false)) {
+        if (entity is File &&
+            _fileName(entity.path) == portableTaskRecordFileName) {
           added += await importTaskRecordFile(entity.path);
         }
       }
@@ -208,6 +212,7 @@ class DownloadManager extends ChangeNotifier {
             : _resolvePath(portableRoot, saveDirRaw.isEmpty ? '.' : saveDirRaw),
         version: e['version'] as String? ?? '',
         groupName: e['groupName'] as String? ?? '',
+        chunkCacheDir: e['chunkCacheDir'] as String?,
         rateLimiter: rateLimiter,
       );
     } else {
@@ -233,7 +238,8 @@ class DownloadManager extends ChangeNotifier {
       received = task.totalSize;
     } else if (task is DownloadTask) {
       final finalFile = File(task.savePath);
-      if (await finalFile.exists() && await finalFile.length() == task.totalSize) {
+      if (await finalFile.exists() &&
+          await finalFile.length() == task.totalSize) {
         status = DownloadStatus.completed;
         received = task.totalSize;
       } else {
@@ -259,7 +265,9 @@ class DownloadManager extends ChangeNotifier {
 
   void _persistPortableRecords(List<Map<String, dynamic>> _) {
     final groups = <String, List<Map<String, dynamic>>>{};
-    for (final task in _tasks.where((t) => t.status != DownloadStatus.canceled)) {
+    for (final task in _tasks.where(
+      (t) => t.status != DownloadStatus.canceled,
+    )) {
       final root = _portableRootForTask(task);
       if (root.isEmpty) continue;
       groups.putIfAbsent(root, () => []).add(_toPortableJson(task, root));
@@ -278,10 +286,9 @@ class DownloadManager extends ChangeNotifier {
     for (final entry in groups.entries) {
       try {
         Directory(entry.key).createSync(recursive: true);
-        File(_portableRecordPath(entry.key)).writeAsStringSync(jsonEncode({
-          'version': 1,
-          'tasks': entry.value,
-        }));
+        File(
+          _portableRecordPath(entry.key),
+        ).writeAsStringSync(jsonEncode({'version': 1, 'tasks': entry.value}));
       } catch (_) {}
     }
   }
@@ -356,13 +363,67 @@ class DownloadManager extends ChangeNotifier {
 
   void removeFinished() {
     _tasks.removeWhere((t) {
-      final removable = t.status == DownloadStatus.completed ||
+      final removable =
+          t.status == DownloadStatus.completed ||
           t.status == DownloadStatus.canceled;
       if (removable) t.removeListener(notifyListeners);
       return removable;
     });
     _persist();
     notifyListeners();
+  }
+
+  /// Deletes chunk cache directories that are safe to remove.
+  ///
+  /// In addition to caches owned by known inactive Sophon tasks, [extraRoots]
+  /// lets callers clean orphan cache directories under configured cache roots.
+  /// Active downloads keep their cache to avoid corrupting in-flight chunks.
+  /// The downloaded final game files are not touched.
+  Future<int> clearChunkCaches({Iterable<String> extraRoots = const []}) async {
+    final activeCacheDirs = <String>{};
+    final cacheDirs = <String>{};
+    for (final task in _tasks.whereType<SophonDownloadTask>()) {
+      if (task.isActive) {
+        activeCacheDirs.add(_normalizedDirectoryPath(task.cacheDir));
+      } else {
+        cacheDirs.add(task.cacheDir);
+      }
+    }
+
+    for (final rootPath in extraRoots) {
+      try {
+        final root = Directory(rootPath);
+        if (!await root.exists()) continue;
+        await for (final entity in root.list(followLinks: false)) {
+          if (entity is! Directory) continue;
+          if (activeCacheDirs.contains(_normalizedDirectoryPath(entity.path))) {
+            continue;
+          }
+          cacheDirs.add(entity.path);
+        }
+      } catch (_) {}
+    }
+
+    var deleted = 0;
+    for (final path in cacheDirs) {
+      if (activeCacheDirs.contains(_normalizedDirectoryPath(path))) continue;
+      try {
+        final dir = Directory(path);
+        if (await dir.exists()) {
+          await dir.delete(recursive: true);
+          deleted++;
+        }
+      } catch (_) {}
+    }
+    return deleted;
+  }
+
+  String _normalizedDirectoryPath(String path) {
+    final absolute = Directory(path).absolute.path;
+    if (absolute.endsWith(Platform.pathSeparator)) {
+      return absolute.substring(0, absolute.length - 1);
+    }
+    return absolute;
   }
 
   Future<void> _deleteTaskFiles(DownloadJob task) async {
@@ -375,11 +436,7 @@ class DownloadManager extends ChangeNotifier {
       } else if (task is SophonDownloadTask) {
         final target = Directory(task.savePath);
         if (await target.exists()) await target.delete(recursive: true);
-        final cache = Directory(
-          '${task.saveDir}${Platform.pathSeparator}.sophon'
-          '${Platform.pathSeparator}chunks'
-          '${Platform.pathSeparator}${task.meta.categoryId}',
-        );
+        final cache = Directory(task.cacheDir);
         if (await cache.exists()) await cache.delete(recursive: true);
       } else {
         final target = File(task.savePath);
@@ -389,8 +446,8 @@ class DownloadManager extends ChangeNotifier {
   }
 
   bool _hasDuplicate(DownloadJob task) => _tasks.any(
-        (t) => t.savePath == task.savePath && t.status != DownloadStatus.canceled,
-      );
+    (t) => t.savePath == task.savePath && t.status != DownloadStatus.canceled,
+  );
 
   Iterable<Map<String, dynamic>> _jsonObjects(List<dynamic> list) sync* {
     for (final e in list) {
@@ -408,6 +465,7 @@ class DownloadManager extends ChangeNotifier {
     final json = Map<String, dynamic>.from(task.toPersistedJson());
     if (task is SophonDownloadTask) {
       json['saveDir'] = '.';
+      json.remove('chunkCacheDir');
     } else if (task is DownloadTask) {
       json['savePath'] = _relativePath(task.savePath, root);
     }
@@ -428,9 +486,9 @@ class DownloadManager extends ChangeNotifier {
   String _resolvePath(String root, String path) {
     if (path.isEmpty || path == '.') return root;
     if (_isAbsolutePath(path)) return path;
-    final parts = _normalizePath(path)
-        .split('/')
-        .where((p) => p.isNotEmpty && p != '.' && p != '..');
+    final parts = _normalizePath(
+      path,
+    ).split('/').where((p) => p.isNotEmpty && p != '.' && p != '..');
     var result = root;
     for (final part in parts) {
       result = '$result${Platform.pathSeparator}$part';

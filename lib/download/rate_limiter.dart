@@ -13,6 +13,7 @@ class RateLimiter {
   int _bytesPerSecond = 0; // 0 or less = unlimited
   double _tokens = 0;
   DateTime _lastRefill = DateTime.now();
+  Future<void> _queue = Future.value();
 
   int get bytesPerSecond => _bytesPerSecond;
 
@@ -35,7 +36,13 @@ class RateLimiter {
   }
 
   /// Waits until [bytes] may pass under the current limit.
-  Future<void> acquire(int bytes) async {
+  Future<void> acquire(int bytes) {
+    final next = _queue.then((_) => _acquireLocked(bytes));
+    _queue = next.catchError((_) {});
+    return next;
+  }
+
+  Future<void> _acquireLocked(int bytes) async {
     if (_bytesPerSecond <= 0) return;
     _refill();
     _tokens -= bytes;

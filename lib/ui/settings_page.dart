@@ -90,6 +90,77 @@ class _SettingsPageState extends State<SettingsPage> {
     await settings.setDownloadDir(null);
   }
 
+  Future<void> _pickChunkCacheDirectory() async {
+    final settings = context.read<AppSettings>();
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      if (!await _ensureStoragePermission()) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('未授予存储权限，无法写入缓存目录')),
+        );
+        return;
+      }
+      final path = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '选择 Chunk 缓存目录',
+      );
+      if (path == null) return;
+      if (!await _isWritable(path)) {
+        messenger.showSnackBar(SnackBar(content: Text('该目录不可写入：$path')));
+        return;
+      }
+      await settings.setChunkCacheDir(path);
+      messenger.showSnackBar(SnackBar(content: Text('Chunk 缓存目录已设置为：$path')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _resetChunkCacheDirectory() async {
+    final settings = context.read<AppSettings>();
+    await settings.setChunkCacheDir(null);
+  }
+
+  Future<void> _clearChunkCaches() async {
+    final manager = context.read<DownloadManager>();
+    final settings = context.read<AppSettings>();
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('清理 Chunk 缓存'),
+        content: const Text(
+          '将删除当前缓存目录下的 Chunk 缓存，以及未运行 Sophon 任务的旧缓存。'
+          '不会删除已下载的游戏文件，正在下载的任务缓存会保留。是否继续？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('清理'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _busy = true);
+    try {
+      final downloadDir = await settings.resolveDownloadDir();
+      final count = await manager.clearChunkCaches(
+        extraRoots: [settings.resolveChunkCacheDir(downloadDir)],
+      );
+      messenger.showSnackBar(
+        SnackBar(content: Text(count == 0 ? '没有可清理的缓存' : '已清理 $count 个缓存目录')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings = context.watch<AppSettings>();
@@ -132,11 +203,63 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+            child: Text(
+              'Chunk 缓存目录',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+          ),
+          FutureBuilder<String>(
+            future: settings.resolveDownloadDir().then(
+              settings.resolveChunkCacheDir,
+            ),
+            builder: (context, snapshot) {
+              return ListTile(
+                leading: const Icon(Icons.storage),
+                title: Text(snapshot.data ?? '...'),
+                subtitle: Text(
+                  settings.customChunkCacheDir == null
+                      ? '默认（下载目录内）'
+                      : '自定义目录，建议选择手机内置高速存储',
+                ),
+              );
+            },
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                FilledButton.icon(
+                  onPressed: _busy ? null : _pickChunkCacheDirectory,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('选择缓存目录'),
+                ),
+                const SizedBox(width: 12),
+                TextButton(
+                  onPressed: settings.customChunkCacheDir == null
+                      ? null
+                      : _resetChunkCacheDirectory,
+                  child: const Text('恢复默认'),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: OutlinedButton.icon(
+              onPressed: _busy ? null : _clearChunkCaches,
+              icon: const Icon(Icons.cleaning_services),
+              label: const Text('清理所有 Chunk 缓存'),
+            ),
+          ),
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text(
               '提示：\n'
               '• Android 上写入 SD 卡 / U 盘（OTG）需要授予“所有文件访问权限”。\n'
+              '• Chunk 缓存目录建议放在手机内置高速存储，下载目录可继续放在 U 盘。\n'
+              '• 清理缓存会删除当前缓存目录和旧任务目录里的 Chunk 缓存，不会删除已下载的游戏文件，正在下载的任务缓存会保留。\n'
               '• 更改目录只影响之后新添加的任务，进行中的任务仍写入原目录。',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),

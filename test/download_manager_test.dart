@@ -2,8 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hoyo_downloader/core/app_settings.dart';
 import 'package:hoyo_downloader/download/download_job.dart';
 import 'package:hoyo_downloader/download/download_manager.dart';
+import 'package:hoyo_downloader/download/sophon_download_task.dart';
 import 'package:hoyo_downloader/models/models.dart';
 import 'package:hoyo_downloader/models/sophon_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -97,6 +99,7 @@ void main() {
 
   test('persists and restores mixed package and Sophon tasks', () async {
     final prefs = await SharedPreferences.getInstance();
+    final cacheDir = '${tempDir.path}/fast_cache';
     final m1 = DownloadManager(maxConcurrent: 0, prefs: prefs);
     m1.addPackageFiles(
       groupName: 'Game 1.0',
@@ -107,6 +110,7 @@ void main() {
       groupName: 'Game 1.0',
       saveDir: tempDir.path,
       version: '1.0',
+      chunkCacheDir: cacheDir,
       manifests: [(sophonMeta(), const SophonChunkManifest(files: []))],
     );
 
@@ -120,64 +124,153 @@ void main() {
     expect(sophonTask.status, DownloadStatus.paused);
     expect(sophonTask.totalSize, 10);
     expect(sophonTask.savePath, '${tempDir.path}/game');
+    expect((sophonTask as SophonDownloadTask).cacheDir, '$cacheDir/game');
   });
 
-  test('writes portable task records and imports them from copied directory',
-      () async {
-    final prefs = await SharedPreferences.getInstance();
+  test(
+    'AppSettings stores and resolves custom chunk cache directory',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      final settings = AppSettings(prefs);
+      final cacheDir = '${tempDir.path}/internal_cache';
+
+      expect(
+        settings.resolveChunkCacheDir('${tempDir.path}/download'),
+        '${tempDir.path}/download/.sophon/chunks',
+      );
+
+      await settings.setChunkCacheDir(cacheDir);
+      expect(settings.customChunkCacheDir, cacheDir);
+      expect(
+        settings.resolveChunkCacheDir('${tempDir.path}/download'),
+        cacheDir,
+      );
+
+      await settings.setChunkCacheDir(null);
+      expect(settings.customChunkCacheDir, isNull);
+    },
+  );
+
+  test('portable Sophon records omit local chunk cache directory', () async {
     final mobileDir = '${tempDir.path}/mobile/Game_1.0';
-    final m1 = DownloadManager(maxConcurrent: 0, prefs: prefs);
-    m1.addPackageFiles(
+    final cacheDir = '${tempDir.path}/internal_cache';
+    final manager = DownloadManager(maxConcurrent: 0);
+    manager.addSophonManifests(
       groupName: 'Game 1.0',
       saveDir: mobileDir,
-      files: [file('a.zip')],
+      version: '1.0',
+      chunkCacheDir: cacheDir,
+      manifests: [(sophonMeta(), const SophonChunkManifest(files: []))],
     );
 
     final record = File(
-        '$mobileDir/${DownloadManager.portableTaskRecordFileName}');
-    expect(await record.exists(), isTrue);
-    final exported = jsonDecode(await record.readAsString()) as Map<String, dynamic>;
-    final tasks = exported['tasks'] as List<dynamic>;
-    expect((tasks.single as Map<String, dynamic>)['savePath'], 'a.zip');
+      '$mobileDir/${DownloadManager.portableTaskRecordFileName}',
+    );
+    final exported =
+        jsonDecode(await record.readAsString()) as Map<String, dynamic>;
+    final task =
+        (exported['tasks'] as List<dynamic>).single as Map<String, dynamic>;
 
-    final pcDir = '${tempDir.path}/pc/Game_1.0';
-    await Directory(pcDir).create(recursive: true);
-    await File('$pcDir/${DownloadManager.portableTaskRecordFileName}')
-        .writeAsString(await record.readAsString());
-
-    final m2 = DownloadManager(maxConcurrent: 0);
-    final added = await m2.importTaskRecordsFromDirectory('${tempDir.path}/pc');
-
-    expect(added, 1);
-    expect(m2.tasks.single.displayName, 'a.zip');
-    expect(m2.tasks.single.savePath, '$pcDir/a.zip');
-    expect(m2.tasks.single.status, DownloadStatus.paused);
+    expect(task['saveDir'], '.');
+    expect(task.containsKey('chunkCacheDir'), isFalse);
   });
 
-  test('removeTask can keep downloaded files while deleting only the record',
-      () async {
+  test('clearChunkCaches deletes inactive and orphan Sophon caches only', () async {
+    final cacheDir = '${tempDir.path}/internal_cache';
+    final saveDir = '${tempDir.path}/download';
     final manager = DownloadManager(maxConcurrent: 0);
-    manager.addPackageFiles(
+    manager.addSophonManifests(
       groupName: 'Game 1.0',
-      saveDir: tempDir.path,
-      files: [file('a.zip')],
+      saveDir: saveDir,
+      version: '1.0',
+      chunkCacheDir: cacheDir,
+      manifests: [(sophonMeta(), const SophonChunkManifest(files: []))],
     );
-    final finalFile = File('${tempDir.path}/a.zip');
-    final tmpFile = File('${tempDir.path}/a.zip_tmp');
-    await finalFile.writeAsBytes([1, 2, 3]);
-    await tmpFile.writeAsBytes([4, 5, 6]);
+    final task = manager.tasks.single as SophonDownloadTask;
+    final cache = Directory(task.cacheDir);
+    final orphanCache = Directory('$cacheDir/orphan');
+    final finalDir = Directory(task.savePath);
+    await cache.create(recursive: true);
+    await File('${cache.path}/chunk').writeAsBytes([1, 2, 3]);
+    await orphanCache.create(recursive: true);
+    await File('${orphanCache.path}/chunk').writeAsBytes([7, 8, 9]);
+    await finalDir.create(recursive: true);
+    await File('${finalDir.path}/file.bin').writeAsBytes([4, 5, 6]);
 
-    await manager.removeTask(manager.tasks.single);
+    final count = await manager.clearChunkCaches(extraRoots: [cacheDir]);
 
-    expect(manager.tasks, isEmpty);
-    expect(await finalFile.exists(), isTrue);
-    expect(await tmpFile.exists(), isTrue);
-    expect(
-      await File('${tempDir.path}/${DownloadManager.portableTaskRecordFileName}')
-          .exists(),
-      isFalse,
-    );
+    expect(count, 2);
+    expect(await cache.exists(), isFalse);
+    expect(await orphanCache.exists(), isFalse);
+    expect(await finalDir.exists(), isTrue);
   });
+
+  test(
+    'writes portable task records and imports them from copied directory',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      final mobileDir = '${tempDir.path}/mobile/Game_1.0';
+      final m1 = DownloadManager(maxConcurrent: 0, prefs: prefs);
+      m1.addPackageFiles(
+        groupName: 'Game 1.0',
+        saveDir: mobileDir,
+        files: [file('a.zip')],
+      );
+
+      final record = File(
+        '$mobileDir/${DownloadManager.portableTaskRecordFileName}',
+      );
+      expect(await record.exists(), isTrue);
+      final exported =
+          jsonDecode(await record.readAsString()) as Map<String, dynamic>;
+      final tasks = exported['tasks'] as List<dynamic>;
+      expect((tasks.single as Map<String, dynamic>)['savePath'], 'a.zip');
+
+      final pcDir = '${tempDir.path}/pc/Game_1.0';
+      await Directory(pcDir).create(recursive: true);
+      await File(
+        '$pcDir/${DownloadManager.portableTaskRecordFileName}',
+      ).writeAsString(await record.readAsString());
+
+      final m2 = DownloadManager(maxConcurrent: 0);
+      final added = await m2.importTaskRecordsFromDirectory(
+        '${tempDir.path}/pc',
+      );
+
+      expect(added, 1);
+      expect(m2.tasks.single.displayName, 'a.zip');
+      expect(m2.tasks.single.savePath, '$pcDir/a.zip');
+      expect(m2.tasks.single.status, DownloadStatus.paused);
+    },
+  );
+
+  test(
+    'removeTask can keep downloaded files while deleting only the record',
+    () async {
+      final manager = DownloadManager(maxConcurrent: 0);
+      manager.addPackageFiles(
+        groupName: 'Game 1.0',
+        saveDir: tempDir.path,
+        files: [file('a.zip')],
+      );
+      final finalFile = File('${tempDir.path}/a.zip');
+      final tmpFile = File('${tempDir.path}/a.zip_tmp');
+      await finalFile.writeAsBytes([1, 2, 3]);
+      await tmpFile.writeAsBytes([4, 5, 6]);
+
+      await manager.removeTask(manager.tasks.single);
+
+      expect(manager.tasks, isEmpty);
+      expect(await finalFile.exists(), isTrue);
+      expect(await tmpFile.exists(), isTrue);
+      expect(
+        await File(
+          '${tempDir.path}/${DownloadManager.portableTaskRecordFileName}',
+        ).exists(),
+        isFalse,
+      );
+    },
+  );
 
   test('removeTask can delete both task record and files', () async {
     final manager = DownloadManager(maxConcurrent: 0);

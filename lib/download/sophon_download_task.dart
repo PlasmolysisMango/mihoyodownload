@@ -11,6 +11,12 @@ import 'download_job.dart';
 import 'rate_limiter.dart';
 import 'zstd_codec.dart';
 
+const _maxChunkPrefetch = 3;
+const _chunkDownloadAttempts = 3;
+const _chunkRequestTimeout = Duration(seconds: 30);
+const _chunkPartTimeout = Duration(seconds: 30);
+const _chunkCacheThreshold = 8 * 1024 * 1024;
+
 /// Downloads one Sophon category by small official chunks.
 ///
 /// Each chunk is cached and verified independently using the official
@@ -24,6 +30,7 @@ class SophonDownloadTask extends DownloadJob {
     required this.version,
     required this.groupName,
     this.initialManifest,
+    this.chunkCacheDir,
     this.rateLimiter,
     this.zstdCodec = const ZstandardZstdCodec(),
   });
@@ -31,6 +38,7 @@ class SophonDownloadTask extends DownloadJob {
   final SophonManifestMeta meta;
   final String saveDir;
   final String version;
+  final String? chunkCacheDir;
   final SophonChunkManifest? initialManifest;
   final RateLimiter? rateLimiter;
   final ZstdCodec zstdCodec;
@@ -39,7 +47,8 @@ class SophonDownloadTask extends DownloadJob {
   http.Client? _client;
   bool _abortRequested = false;
   Timer? _speedTimer;
-  int _lastBytes = 0;
+  int _lastNetworkBytes = 0;
+  int _networkBytes = 0;
   int _receivedBytes = 0;
   double _speed = 0;
   String? _error;
@@ -72,7 +81,12 @@ class SophonDownloadTask extends DownloadJob {
   @override
   DownloadStatus get status => _status;
 
-  String get _cacheDir => '$saveDir/.sophon/chunks/${meta.categoryId}';
+  String get cacheDir {
+    final root = chunkCacheDir == null || chunkCacheDir!.isEmpty
+        ? '$saveDir/.sophon/chunks'
+        : chunkCacheDir!;
+    return '$root/${meta.categoryId}';
+  }
 
   @override
   Future<bool> run() async {
@@ -80,6 +94,8 @@ class SophonDownloadTask extends DownloadJob {
     _abortRequested = false;
     _error = null;
     _receivedBytes = 0;
+    _networkBytes = 0;
+    _lastNetworkBytes = 0;
     _setStatus(DownloadStatus.downloading);
     _startSpeedTimer();
     _client = http.Client();
@@ -91,8 +107,10 @@ class SophonDownloadTask extends DownloadJob {
           await Directory(_targetPath(file.file)).create(recursive: true);
           continue;
         }
-        final fileCompressedSize =
-            file.chunks.fold<int>(0, (sum, c) => sum + c.compressedSize);
+        final fileCompressedSize = file.chunks.fold<int>(
+          0,
+          (sum, c) => sum + c.compressedSize,
+        );
         if (await _isFinalFileValid(file)) {
           _receivedBytes += fileCompressedSize;
           notifyListeners();
@@ -115,6 +133,8 @@ class SophonDownloadTask extends DownloadJob {
       }
       _setStatus(DownloadStatus.completed);
       return true;
+    } on _SophonPausedException {
+      return _pause();
     } catch (e) {
       if (_abortRequested) return _pause();
       _fail(e.toString());
@@ -136,51 +156,86 @@ class SophonDownloadTask extends DownloadJob {
     final client = _client ?? http.Client();
     final response = await client.get(Uri.parse(meta.manifestUrl));
     if (response.statusCode != 200 && response.statusCode != 206) {
-      throw HttpException('HTTP ${response.statusCode}',
-          uri: Uri.parse(meta.manifestUrl));
+      throw HttpException(
+        'HTTP ${response.statusCode}',
+        uri: Uri.parse(meta.manifestUrl),
+      );
     }
-    final decompressed = await zstdCodec.decompress(Uint8List.fromList(response.bodyBytes));
+    final decompressed = await zstdCodec.decompress(
+      Uint8List.fromList(response.bodyBytes),
+    );
     if (decompressed == null) {
       throw const FormatException('Can not decompress Sophon manifest.');
     }
     final checksum = hex.encode(md5.convert(decompressed).bytes);
     if (meta.manifestChecksum.isNotEmpty && checksum != meta.manifestChecksum) {
       throw FormatException(
-          'Sophon manifest checksum mismatch: $checksum != ${meta.manifestChecksum}');
+        'Sophon manifest checksum mismatch: $checksum != ${meta.manifestChecksum}',
+      );
     }
     _manifest = SophonChunkManifest.fromProtoBytes(decompressed);
     return _manifest!;
   }
 
-  Future<void> _assembleFile(SophonFile file, {bool countProgress = true}) async {
+  Future<void> _assembleFile(
+    SophonFile file, {
+    bool countProgress = true,
+  }) async {
     final target = File(_targetPath(file.file));
     await target.parent.create(recursive: true);
     final raf = await target.open(mode: FileMode.write);
+    final pending = <int, Future<_PreparedSophonChunk>>{};
+    var nextPrefetchIndex = 0;
+
+    void prefetchMore() {
+      while (!_abortRequested &&
+          nextPrefetchIndex < file.chunks.length &&
+          pending.length < _maxChunkPrefetch) {
+        final index = nextPrefetchIndex++;
+        final future = _prepareChunk(file.chunks[index]);
+        unawaited(future.then<void>((_) {}, onError: (_) {}));
+        pending[index] = future;
+      }
+    }
+
     try {
       await raf.truncate(file.size);
-      for (final chunk in file.chunks) {
-        if (_abortRequested) return;
-        final compressed = await _getVerifiedCompressedChunk(chunk);
-        final decompressed = await zstdCodec.decompress(compressed);
-        if (decompressed == null) {
-          await _deleteChunk(chunk);
-          throw FormatException('Can not decompress chunk ${chunk.id}');
-        }
-        if (decompressed.length != chunk.uncompressedSize ||
-            _md5Hex(decompressed) != chunk.uncompressedMd5) {
-          await _deleteChunk(chunk);
-          throw FormatException('Chunk MD5 mismatch: ${chunk.id}');
-        }
-        await raf.setPosition(chunk.offset);
-        await raf.writeFrom(decompressed);
+      prefetchMore();
+      for (var index = 0; index < file.chunks.length; index++) {
+        if (_abortRequested) throw const _SophonPausedException();
+        final prepared = await pending.remove(index)!;
+        prefetchMore();
+        if (_abortRequested) throw const _SophonPausedException();
+        await raf.setPosition(prepared.chunk.offset);
+        await raf.writeFrom(prepared.decompressed);
         if (countProgress) {
-          _receivedBytes += chunk.compressedSize;
+          _receivedBytes += prepared.chunk.compressedSize;
           notifyListeners();
         }
       }
     } finally {
+      await Future.wait(
+        pending.values.map(
+          (future) => future.then<void>((_) {}, onError: (_) {}),
+        ),
+      );
       await raf.close();
     }
+  }
+
+  Future<_PreparedSophonChunk> _prepareChunk(SophonChunk chunk) async {
+    final compressed = await _getVerifiedCompressedChunk(chunk);
+    final decompressed = await zstdCodec.decompress(compressed);
+    if (decompressed == null) {
+      await _deleteChunk(chunk);
+      throw FormatException('Can not decompress chunk ${chunk.id}');
+    }
+    if (decompressed.length != chunk.uncompressedSize ||
+        _md5Hex(decompressed) != chunk.uncompressedMd5) {
+      await _deleteChunk(chunk);
+      throw FormatException('Chunk MD5 mismatch: ${chunk.id}');
+    }
+    return _PreparedSophonChunk(chunk, decompressed);
   }
 
   Future<Uint8List> _getVerifiedCompressedChunk(SophonChunk chunk) async {
@@ -190,35 +245,84 @@ class SophonDownloadTask extends DownloadJob {
       if (_md5Hex(bytes) == chunk.compressedMd5) return bytes;
       await cache.delete();
     }
+    return _downloadVerifiedCompressedChunk(chunk, cache);
+  }
+
+  Future<Uint8List> _downloadVerifiedCompressedChunk(
+    SophonChunk chunk,
+    File cache,
+  ) async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= _chunkDownloadAttempts; attempt++) {
+      if (_abortRequested) throw const _SophonPausedException();
+      try {
+        final bytes = _shouldCacheChunk(chunk)
+            ? await _downloadChunkToCache(chunk, cache)
+            : await _downloadChunkToMemory(chunk);
+        if (bytes.length != chunk.compressedSize ||
+            _md5Hex(bytes) != chunk.compressedMd5) {
+          await _deleteChunk(chunk);
+          throw FormatException('Compressed chunk MD5 mismatch: ${chunk.id}');
+        }
+        return bytes;
+      } catch (e) {
+        if (_abortRequested) throw const _SophonPausedException();
+        lastError = e;
+        await _deleteChunk(chunk);
+        if (attempt < _chunkDownloadAttempts) {
+          await Future<void>.delayed(Duration(milliseconds: 300 * attempt));
+        }
+      }
+    }
+    throw lastError ?? FormatException('Can not download chunk ${chunk.id}');
+  }
+
+  Future<Uint8List> _downloadChunkToMemory(SophonChunk chunk) async {
+    final builder = BytesBuilder(copy: false);
+    await _downloadChunkStream(chunk, (part) {
+      builder.add(part);
+    });
+    return builder.takeBytes();
+  }
+
+  Future<Uint8List> _downloadChunkToCache(SophonChunk chunk, File cache) async {
     await cache.parent.create(recursive: true);
     final tmp = File('${cache.path}_tmp');
-    final request = http.Request('GET', Uri.parse(meta.chunkUrl(chunk.id)));
-    final response = await (_client ?? http.Client()).send(request);
-    if (response.statusCode != 200) {
-      throw HttpException('HTTP ${response.statusCode}',
-          uri: Uri.parse(meta.chunkUrl(chunk.id)));
-    }
     final sink = tmp.openWrite(mode: FileMode.write);
     try {
-      await for (final part in response.stream) {
-        if (_abortRequested) break;
-        if (rateLimiter != null) await rateLimiter!.acquire(part.length);
-        if (_abortRequested) break;
-        sink.add(part);
-      }
+      await _downloadChunkStream(chunk, sink.add);
       await sink.flush();
     } finally {
       await sink.close();
     }
     if (_abortRequested) throw const _SophonPausedException();
     final bytes = await tmp.readAsBytes();
-    if (bytes.length != chunk.compressedSize ||
-        _md5Hex(bytes) != chunk.compressedMd5) {
-      await tmp.delete();
-      throw FormatException('Compressed chunk MD5 mismatch: ${chunk.id}');
-    }
     await tmp.rename(cache.path);
     return bytes;
+  }
+
+  Future<void> _downloadChunkStream(
+    SophonChunk chunk,
+    void Function(List<int> part) onPart,
+  ) async {
+    final request = http.Request('GET', Uri.parse(meta.chunkUrl(chunk.id)));
+    final response = await (_client ?? http.Client())
+        .send(request)
+        .timeout(_chunkRequestTimeout);
+    if (response.statusCode != 200) {
+      throw HttpException(
+        'HTTP ${response.statusCode}',
+        uri: Uri.parse(meta.chunkUrl(chunk.id)),
+      );
+    }
+    await for (final part in response.stream.timeout(_chunkPartTimeout)) {
+      if (_abortRequested) break;
+      if (rateLimiter != null) await rateLimiter!.acquire(part.length);
+      if (_abortRequested) break;
+      _networkBytes += part.length;
+      onPart(part);
+    }
+    if (_abortRequested) throw const _SophonPausedException();
   }
 
   Future<bool> _isFinalFileValid(SophonFile file) async {
@@ -252,13 +356,17 @@ class SophonDownloadTask extends DownloadJob {
     return '$saveDir${Platform.pathSeparator}$safe';
   }
 
-  String _chunkPath(SophonChunk chunk) => '$_cacheDir/${chunk.id}';
+  String _chunkPath(SophonChunk chunk) => '$cacheDir/${chunk.id}';
+
+  bool _shouldCacheChunk(SophonChunk chunk) {
+    return chunk.compressedSize >= _chunkCacheThreshold;
+  }
 
   void _startSpeedTimer() {
-    _lastBytes = _receivedBytes;
+    _lastNetworkBytes = _networkBytes;
     _speedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _speed = (_receivedBytes - _lastBytes).toDouble();
-      _lastBytes = _receivedBytes;
+      _speed = (_networkBytes - _lastNetworkBytes).toDouble();
+      _lastNetworkBytes = _networkBytes;
       notifyListeners();
     });
   }
@@ -306,13 +414,15 @@ class SophonDownloadTask extends DownloadJob {
 
   @override
   Map<String, dynamic> toPersistedJson() => {
-        'type': 'sophon',
-        'saveDir': saveDir,
-        'version': version,
-        'groupName': groupName,
-        'meta': meta.toJson(),
-        'status': status == DownloadStatus.completed ? 'completed' : 'paused',
-      };
+    'type': 'sophon',
+    'saveDir': saveDir,
+    'version': version,
+    'groupName': groupName,
+    if (chunkCacheDir != null && chunkCacheDir!.isNotEmpty)
+      'chunkCacheDir': chunkCacheDir,
+    'meta': meta.toJson(),
+    'status': status == DownloadStatus.completed ? 'completed' : 'paused',
+  };
 
   void _setStatus(DownloadStatus value) {
     _status = value;
@@ -327,6 +437,13 @@ class SophonDownloadTask extends DownloadJob {
 
 class _SophonPausedException implements Exception {
   const _SophonPausedException();
+}
+
+class _PreparedSophonChunk {
+  const _PreparedSophonChunk(this.chunk, this.decompressed);
+
+  final SophonChunk chunk;
+  final Uint8List decompressed;
 }
 
 String _md5Hex(Uint8List bytes) => hex.encode(md5.convert(bytes).bytes);
