@@ -48,6 +48,14 @@ class DownloadManager extends ChangeNotifier {
   final Set<String> _portableRoots = {};
   List<DownloadJob> get tasks => List.unmodifiable(_tasks);
 
+  @visibleForTesting
+  void addJobForTesting(DownloadJob task) {
+    task.addListener(notifyListeners);
+    _tasks.add(task);
+    notifyListeners();
+    _pump();
+  }
+
   int get activeCount => _tasks.where((t) => t.isActive).length;
 
   int get totalSize => _tasks.fold(0, (s, t) => s + t.totalSize);
@@ -306,7 +314,9 @@ class DownloadManager extends ChangeNotifier {
   Future<void> _runTask(DownloadJob task) async {
     await task.run();
     _persist();
-    _pump();
+    if (task.status != DownloadStatus.paused) {
+      _pump();
+    }
   }
 
   void pause(DownloadJob task) {

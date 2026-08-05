@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,6 +10,93 @@ import 'package:hoyo_downloader/download/sophon_download_task.dart';
 import 'package:hoyo_downloader/models/models.dart';
 import 'package:hoyo_downloader/models/sophon_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+class _BlockingDownloadJob extends DownloadJob {
+  _BlockingDownloadJob(this.displayName);
+
+  final Completer<void> started = Completer<void>();
+  final Completer<void> _released = Completer<void>();
+
+  DownloadStatus _status = DownloadStatus.queued;
+  bool _pauseRequested = false;
+
+  @override
+  String get savePath => displayName;
+
+  @override
+  int get totalSize => 1;
+
+  @override
+  int get receivedBytes => 0;
+
+  @override
+  double get progress => 0;
+
+  @override
+  double get speed => 0;
+
+  @override
+  String? get error => null;
+
+  @override
+  final String displayName;
+
+  @override
+  String get groupName => 'test';
+
+  @override
+  DownloadStatus get status => _status;
+
+  @override
+  Future<bool> run() async {
+    _status = DownloadStatus.downloading;
+    notifyListeners();
+    if (!started.isCompleted) started.complete();
+    await _released.future;
+    if (_pauseRequested) {
+      _status = DownloadStatus.paused;
+      notifyListeners();
+      return false;
+    }
+    _status = DownloadStatus.completed;
+    notifyListeners();
+    return true;
+  }
+
+  @override
+  void pause() {
+    if (!isActive) return;
+    _pauseRequested = true;
+    if (!_released.isCompleted) _released.complete();
+  }
+
+  @override
+  Future<void> cancel() async {
+    _status = DownloadStatus.canceled;
+    if (!_released.isCompleted) _released.complete();
+    notifyListeners();
+  }
+
+  @override
+  void reset() {
+    if (isActive) return;
+    _pauseRequested = false;
+    _status = DownloadStatus.queued;
+    notifyListeners();
+  }
+
+  @override
+  void restoreState(DownloadStatus status, int receivedBytes) {
+    _status = status;
+  }
+
+  @override
+  Map<String, dynamic> toPersistedJson() => {
+    'type': 'test',
+    'savePath': savePath,
+    'displayName': displayName,
+  };
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -97,6 +185,31 @@ void main() {
     expect(m2.tasks.single.displayName, 'b.zip');
   });
 
+  test('pausing active task does not start queued task', () async {
+    final manager = DownloadManager(maxConcurrent: 1);
+    final first = _BlockingDownloadJob('a.zip');
+    final second = _BlockingDownloadJob('b.zip');
+
+    manager.addJobForTesting(first);
+    manager.addJobForTesting(second);
+    await first.started.future;
+
+    expect(first.status, DownloadStatus.downloading);
+    expect(second.status, DownloadStatus.queued);
+
+    manager.pause(first);
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (first.status != DownloadStatus.paused &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    expect(first.status, DownloadStatus.paused);
+    expect(second.status, DownloadStatus.queued);
+    expect(second.started.isCompleted, isFalse);
+  });
+
   test('persists and restores mixed package and Sophon tasks', () async {
     final prefs = await SharedPreferences.getInstance();
     final cacheDir = '${tempDir.path}/fast_cache';
@@ -175,35 +288,38 @@ void main() {
     expect(task.containsKey('chunkCacheDir'), isFalse);
   });
 
-  test('clearChunkCaches deletes inactive and orphan Sophon caches only', () async {
-    final cacheDir = '${tempDir.path}/internal_cache';
-    final saveDir = '${tempDir.path}/download';
-    final manager = DownloadManager(maxConcurrent: 0);
-    manager.addSophonManifests(
-      groupName: 'Game 1.0',
-      saveDir: saveDir,
-      version: '1.0',
-      chunkCacheDir: cacheDir,
-      manifests: [(sophonMeta(), const SophonChunkManifest(files: []))],
-    );
-    final task = manager.tasks.single as SophonDownloadTask;
-    final cache = Directory(task.cacheDir);
-    final orphanCache = Directory('$cacheDir/orphan');
-    final finalDir = Directory(task.savePath);
-    await cache.create(recursive: true);
-    await File('${cache.path}/chunk').writeAsBytes([1, 2, 3]);
-    await orphanCache.create(recursive: true);
-    await File('${orphanCache.path}/chunk').writeAsBytes([7, 8, 9]);
-    await finalDir.create(recursive: true);
-    await File('${finalDir.path}/file.bin').writeAsBytes([4, 5, 6]);
+  test(
+    'clearChunkCaches deletes inactive and orphan Sophon caches only',
+    () async {
+      final cacheDir = '${tempDir.path}/internal_cache';
+      final saveDir = '${tempDir.path}/download';
+      final manager = DownloadManager(maxConcurrent: 0);
+      manager.addSophonManifests(
+        groupName: 'Game 1.0',
+        saveDir: saveDir,
+        version: '1.0',
+        chunkCacheDir: cacheDir,
+        manifests: [(sophonMeta(), const SophonChunkManifest(files: []))],
+      );
+      final task = manager.tasks.single as SophonDownloadTask;
+      final cache = Directory(task.cacheDir);
+      final orphanCache = Directory('$cacheDir/orphan');
+      final finalDir = Directory(task.savePath);
+      await cache.create(recursive: true);
+      await File('${cache.path}/chunk').writeAsBytes([1, 2, 3]);
+      await orphanCache.create(recursive: true);
+      await File('${orphanCache.path}/chunk').writeAsBytes([7, 8, 9]);
+      await finalDir.create(recursive: true);
+      await File('${finalDir.path}/file.bin').writeAsBytes([4, 5, 6]);
 
-    final count = await manager.clearChunkCaches(extraRoots: [cacheDir]);
+      final count = await manager.clearChunkCaches(extraRoots: [cacheDir]);
 
-    expect(count, 2);
-    expect(await cache.exists(), isFalse);
-    expect(await orphanCache.exists(), isFalse);
-    expect(await finalDir.exists(), isTrue);
-  });
+      expect(count, 2);
+      expect(await cache.exists(), isFalse);
+      expect(await orphanCache.exists(), isFalse);
+      expect(await finalDir.exists(), isTrue);
+    },
+  );
 
   test(
     'writes portable task records and imports them from copied directory',
