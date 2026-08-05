@@ -19,10 +19,35 @@ class DownloadsPage extends StatelessWidget {
     if (path == null) return;
     final count = await manager.importTaskRecordsFromDirectory(path);
     messenger.showSnackBar(
-      SnackBar(
-        content: Text(count == 0 ? '未找到可载入的任务记录' : '已载入 $count 个下载任务'),
+      SnackBar(content: Text(count == 0 ? '未找到可载入的任务记录' : '已载入 $count 个下载任务')),
+    );
+  }
+
+  Future<void> _removeAllTasks(BuildContext context) async {
+    final manager = context.read<DownloadManager>();
+    final choice = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除全部任务？'),
+        content: const Text('可以只删除任务记录，或同时删除已下载文件和临时缓存。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('仅删除任务'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('任务和文件都删除'),
+          ),
+        ],
       ),
     );
+    if (choice == null) return;
+    await manager.removeAllTasks(deleteFiles: choice);
   }
 
   @override
@@ -49,6 +74,11 @@ class DownloadsPage extends StatelessWidget {
             icon: const Icon(Icons.play_arrow),
           ),
           IconButton(
+            tooltip: '删除全部任务',
+            onPressed: tasks.isEmpty ? null : () => _removeAllTasks(context),
+            icon: const Icon(Icons.delete_sweep),
+          ),
+          IconButton(
             tooltip: '清除已完成',
             onPressed: manager.removeFinished,
             icon: const Icon(Icons.clear_all),
@@ -73,10 +103,7 @@ class DownloadsPage extends StatelessWidget {
   }
 }
 
-enum _TaskMenuAction {
-  removeRecord,
-  removeTaskAndFiles,
-}
+enum _TaskMenuAction { removeRecord, removeTaskAndFiles }
 
 class _TotalBar extends StatelessWidget {
   const _TotalBar({required this.manager});
@@ -120,8 +147,11 @@ class _TaskTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListTile(
       isThreeLine: true,
-      title: Text(task.displayName,
-          maxLines: 1, overflow: TextOverflow.ellipsis),
+      title: Text(
+        task.displayName,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

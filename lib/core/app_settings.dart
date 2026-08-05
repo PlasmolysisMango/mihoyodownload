@@ -3,12 +3,15 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// App-level settings persisted with SharedPreferences.
-/// Stores download parameters such as download and chunk cache directories.
+/// Stores download parameters such as download and cache directories.
 class AppSettings extends ChangeNotifier {
   AppSettings(this._prefs);
 
   static const _kDownloadDir = 'download_dir';
-  static const _kChunkCacheDir = 'chunk_cache_dir';
+  // Keep the old key name for backward compatibility with existing settings.
+  static const _kCacheDir = 'chunk_cache_dir';
+  static const _kExperimentalChunk = 'experimental_chunk_enabled';
+  static const _kPackageCacheEnabled = 'package_cache_enabled';
   static const _kMaxConcurrent = 'max_concurrent';
   static const _kSpeedLimit = 'speed_limit_bps';
 
@@ -17,8 +20,19 @@ class AppSettings extends ChangeNotifier {
   /// User-selected download directory; null means the app default.
   String? get customDownloadDir => _prefs.getString(_kDownloadDir);
 
-  /// User-selected Sophon chunk cache directory; null means the download dir.
-  String? get customChunkCacheDir => _prefs.getString(_kChunkCacheDir);
+  /// User-selected high-speed cache directory; null means mode-specific default.
+  String? get customCacheDir => _prefs.getString(_kCacheDir);
+
+  /// Backward-compatible name for the Sophon cache directory setting.
+  String? get customChunkCacheDir => customCacheDir;
+
+  /// Sophon/chunk mode is experimental and disabled by default.
+  bool get experimentalChunkEnabled =>
+      _prefs.getBool(_kExperimentalChunk) ?? false;
+
+  /// Package cache downloading is disabled by default.
+  bool get packageCacheEnabled =>
+      _prefs.getBool(_kPackageCacheEnabled) ?? false;
 
   /// The effective download root: the custom directory when set,
   /// otherwise `<app documents>/downloads`.
@@ -47,18 +61,39 @@ class AppSettings extends ChangeNotifier {
   /// behavior. A custom directory can point to faster internal storage while
   /// downloaded game files still go to an external drive.
   String resolveChunkCacheDir(String downloadDir) {
-    final custom = customChunkCacheDir;
+    final custom = customCacheDir;
     if (custom != null && custom.isNotEmpty) return custom;
     return '$downloadDir/.sophon/chunks';
   }
 
-  /// Sets the Sophon chunk cache directory; pass null to restore the default.
-  Future<void> setChunkCacheDir(String? path) async {
+  /// The effective package cache root; null keeps the legacy direct tmp path.
+  String? resolvePackageCacheDir() {
+    if (!packageCacheEnabled) return null;
+    final custom = customCacheDir;
+    if (custom != null && custom.isNotEmpty) return custom;
+    return null;
+  }
+
+  /// Sets the high-speed cache directory; pass null to restore the default.
+  Future<void> setCacheDir(String? path) async {
     if (path == null || path.isEmpty) {
-      await _prefs.remove(_kChunkCacheDir);
+      await _prefs.remove(_kCacheDir);
     } else {
-      await _prefs.setString(_kChunkCacheDir, path);
+      await _prefs.setString(_kCacheDir, path);
     }
+    notifyListeners();
+  }
+
+  /// Backward-compatible setter for the Sophon cache directory setting.
+  Future<void> setChunkCacheDir(String? path) => setCacheDir(path);
+
+  Future<void> setExperimentalChunkEnabled(bool value) async {
+    await _prefs.setBool(_kExperimentalChunk, value);
+    notifyListeners();
+  }
+
+  Future<void> setPackageCacheEnabled(bool value) async {
+    await _prefs.setBool(_kPackageCacheEnabled, value);
     notifyListeners();
   }
 

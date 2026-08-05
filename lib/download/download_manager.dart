@@ -69,6 +69,7 @@ class DownloadManager extends ChangeNotifier {
     required String groupName,
     required String saveDir,
     required List<GamePackageFile> files,
+    String? cacheDir,
   }) {
     for (final file in files) {
       final savePath = '$saveDir/${file.fileName}';
@@ -84,6 +85,7 @@ class DownloadManager extends ChangeNotifier {
         expectedMd5: file.md5,
         displayName: file.fileName,
         groupName: groupName,
+        cacheDir: cacheDir,
         rateLimiter: rateLimiter,
       );
       task.addListener(notifyListeners);
@@ -234,6 +236,7 @@ class DownloadManager extends ChangeNotifier {
         expectedMd5: e['expectedMd5'] as String? ?? '',
         displayName: e['displayName'] as String? ?? '',
         groupName: e['groupName'] as String? ?? '',
+        cacheDir: portableRoot == null ? e['cacheDir'] as String? : null,
         rateLimiter: rateLimiter,
       );
     }
@@ -251,7 +254,7 @@ class DownloadManager extends ChangeNotifier {
         status = DownloadStatus.completed;
         received = task.totalSize;
       } else {
-        final tmpFile = File('${task.savePath}_tmp');
+        final tmpFile = File(task.tmpPath);
         if (await tmpFile.exists()) {
           received = await tmpFile.length();
         }
@@ -355,6 +358,22 @@ class DownloadManager extends ChangeNotifier {
     _pump();
   }
 
+  Future<void> removeAllTasks({bool deleteFiles = false}) async {
+    final tasks = List<DownloadJob>.from(_tasks);
+    for (final task in tasks) {
+      if (deleteFiles) {
+        await task.cancel();
+        await _deleteTaskFiles(task);
+      } else if (task.isActive) {
+        task.pause();
+      }
+      task.removeListener(notifyListeners);
+    }
+    _tasks.clear();
+    _persist();
+    notifyListeners();
+  }
+
   void pauseAll() {
     for (final task in _tasks) {
       task.pause();
@@ -383,20 +402,30 @@ class DownloadManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Deletes chunk cache directories that are safe to remove.
+  /// Deletes download cache entries that are safe to remove.
   ///
-  /// In addition to caches owned by known inactive Sophon tasks, [extraRoots]
-  /// lets callers clean orphan cache directories under configured cache roots.
-  /// Active downloads keep their cache to avoid corrupting in-flight chunks.
+  /// In addition to caches owned by known inactive tasks, [extraRoots]
+  /// lets callers clean orphan cache entries under configured cache roots.
+  /// Active downloads keep their cache to avoid corrupting in-flight data.
   /// The downloaded final game files are not touched.
   Future<int> clearChunkCaches({Iterable<String> extraRoots = const []}) async {
-    final activeCacheDirs = <String>{};
-    final cacheDirs = <String>{};
-    for (final task in _tasks.whereType<SophonDownloadTask>()) {
-      if (task.isActive) {
-        activeCacheDirs.add(_normalizedDirectoryPath(task.cacheDir));
-      } else {
-        cacheDirs.add(task.cacheDir);
+    final activePaths = <String>{};
+    final cachePaths = <String>{};
+    for (final task in _tasks) {
+      if (task is SophonDownloadTask) {
+        if (task.isActive) {
+          activePaths.add(_normalizedPath(task.cacheDir));
+        } else {
+          cachePaths.add(task.cacheDir);
+        }
+      } else if (task is DownloadTask &&
+          task.cacheDir != null &&
+          task.cacheDir!.isNotEmpty) {
+        if (task.isActive) {
+          activePaths.add(_normalizedPath(task.tmpPath));
+        } else {
+          cachePaths.add(task.tmpPath);
+        }
       }
     }
 
@@ -405,22 +434,24 @@ class DownloadManager extends ChangeNotifier {
         final root = Directory(rootPath);
         if (!await root.exists()) continue;
         await for (final entity in root.list(followLinks: false)) {
-          if (entity is! Directory) continue;
-          if (activeCacheDirs.contains(_normalizedDirectoryPath(entity.path))) {
-            continue;
-          }
-          cacheDirs.add(entity.path);
+          final path = _normalizedPath(entity.path);
+          if (activePaths.contains(path)) continue;
+          cachePaths.add(entity.path);
         }
       } catch (_) {}
     }
 
     var deleted = 0;
-    for (final path in cacheDirs) {
-      if (activeCacheDirs.contains(_normalizedDirectoryPath(path))) continue;
+    for (final path in cachePaths) {
+      if (activePaths.contains(_normalizedPath(path))) continue;
       try {
-        final dir = Directory(path);
-        if (await dir.exists()) {
-          await dir.delete(recursive: true);
+        final type = await FileSystemEntity.type(path, followLinks: false);
+        if (type == FileSystemEntityType.directory) {
+          await Directory(path).delete(recursive: true);
+          deleted++;
+        } else if (type == FileSystemEntityType.file ||
+            type == FileSystemEntityType.link) {
+          await File(path).delete();
           deleted++;
         }
       } catch (_) {}
@@ -428,8 +459,10 @@ class DownloadManager extends ChangeNotifier {
     return deleted;
   }
 
-  String _normalizedDirectoryPath(String path) {
-    final absolute = Directory(path).absolute.path;
+  String _normalizedPath(String path) {
+    final absolute = FileSystemEntity.isDirectorySync(path)
+        ? Directory(path).absolute.path
+        : File(path).absolute.path;
     if (absolute.endsWith(Platform.pathSeparator)) {
       return absolute.substring(0, absolute.length - 1);
     }
@@ -441,7 +474,7 @@ class DownloadManager extends ChangeNotifier {
       if (task is DownloadTask) {
         final finalFile = File(task.savePath);
         if (await finalFile.exists()) await finalFile.delete();
-        final tmpFile = File('${task.savePath}_tmp');
+        final tmpFile = File(task.tmpPath);
         if (await tmpFile.exists()) await tmpFile.delete();
       } else if (task is SophonDownloadTask) {
         final target = Directory(task.savePath);
@@ -478,6 +511,7 @@ class DownloadManager extends ChangeNotifier {
       json.remove('chunkCacheDir');
     } else if (task is DownloadTask) {
       json['savePath'] = _relativePath(task.savePath, root);
+      json.remove('cacheDir');
     }
     return json;
   }

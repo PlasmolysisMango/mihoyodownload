@@ -22,6 +22,7 @@ class DownloadTask extends DownloadJob {
     required this.expectedMd5,
     required this.displayName,
     this.groupName = '',
+    this.cacheDir,
     this.rateLimiter,
   });
 
@@ -41,6 +42,9 @@ class DownloadTask extends DownloadJob {
   /// Which game/version this file belongs to, for UI grouping.
   @override
   final String groupName;
+
+  /// Optional high-speed cache root for the resumable tmp file.
+  final String? cacheDir;
 
   /// Shared limiter throttling the aggregate download speed; null = unlimited.
   final RateLimiter? rateLimiter;
@@ -68,11 +72,20 @@ class DownloadTask extends DownloadJob {
   http.Client? _client;
   bool _abortRequested = false;
 
-  String get _tmpPath => '${savePath}_tmp';
+  String get tmpPath {
+    final root = cacheDir;
+    if (root == null || root.isEmpty) return '${savePath}_tmp';
+    final key = hex.encode(md5.convert(savePath.codeUnits).bytes);
+    final name = _fileName(savePath);
+    return '$root/$key-$name.tmp';
+  }
+
+  String get _tmpPath => tmpPath;
 
   @override
   bool get isActive =>
-      _status == DownloadStatus.downloading || _status == DownloadStatus.verifying;
+      _status == DownloadStatus.downloading ||
+      _status == DownloadStatus.verifying;
 
   /// Runs the download until completion, pause or failure.
   /// Returns true when the file is completed and verified.
@@ -119,7 +132,7 @@ class DownloadTask extends DownloadJob {
 
       _setStatus(DownloadStatus.verifying);
       if (await _verifyMd5(tmpFile)) {
-        await tmpFile.rename(savePath);
+        await _publishCompletedFile(tmpFile);
         _setStatus(DownloadStatus.completed);
         return true;
       } else {
@@ -166,7 +179,8 @@ class DownloadTask extends DownloadJob {
     }
 
     final sink = tmpFile.openWrite(
-        mode: resumed ? FileMode.append : FileMode.write);
+      mode: resumed ? FileMode.append : FileMode.write,
+    );
     int lastBytes = _receivedBytes;
     final speedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _speed = (_receivedBytes - lastBytes).toDouble();
@@ -203,7 +217,7 @@ class DownloadTask extends DownloadJob {
       }
       _setStatus(DownloadStatus.verifying);
       if (await _verifyMd5(tmpFile)) {
-        await tmpFile.rename(savePath);
+        await _publishCompletedFile(tmpFile);
         _setStatus(DownloadStatus.completed);
         return true;
       }
@@ -232,6 +246,19 @@ class DownloadTask extends DownloadJob {
     input.close();
     return hex.encode(output.events.single.bytes) == expectedMd5;
   }
+
+  Future<void> _publishCompletedFile(File tmpFile) async {
+    final finalFile = File(savePath);
+    await finalFile.parent.create(recursive: true);
+    if (cacheDir == null || cacheDir!.isEmpty) {
+      await tmpFile.rename(savePath);
+      return;
+    }
+    await tmpFile.copy(savePath);
+    await tmpFile.delete();
+  }
+
+  String _fileName(String path) => path.replaceAll('\\', '/').split('/').last;
 
   /// Requests pause; the running loop stops at the next chunk.
   @override
@@ -279,15 +306,16 @@ class DownloadTask extends DownloadJob {
 
   @override
   Map<String, dynamic> toPersistedJson() => {
-        'type': 'package',
-        'url': url,
-        'savePath': savePath,
-        'totalSize': totalSize,
-        'expectedMd5': expectedMd5,
-        'displayName': displayName,
-        'groupName': groupName,
-        'status': status == DownloadStatus.completed ? 'completed' : 'paused',
-      };
+    'type': 'package',
+    'url': url,
+    'savePath': savePath,
+    'totalSize': totalSize,
+    'expectedMd5': expectedMd5,
+    'displayName': displayName,
+    'groupName': groupName,
+    'cacheDir': cacheDir,
+    'status': status == DownloadStatus.completed ? 'completed' : 'paused',
+  };
 
   void _setStatus(DownloadStatus value) {
     _status = value;

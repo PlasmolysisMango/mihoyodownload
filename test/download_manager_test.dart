@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hoyo_downloader/core/app_settings.dart';
 import 'package:hoyo_downloader/download/download_job.dart';
 import 'package:hoyo_downloader/download/download_manager.dart';
+import 'package:hoyo_downloader/download/download_task.dart';
 import 'package:hoyo_downloader/download/sophon_download_task.dart';
 import 'package:hoyo_downloader/models/models.dart';
 import 'package:hoyo_downloader/models/sophon_models.dart';
@@ -187,8 +188,8 @@ void main() {
 
   test('pausing active task does not start queued task', () async {
     final manager = DownloadManager(maxConcurrent: 1);
-    final first = _BlockingDownloadJob('a.zip');
-    final second = _BlockingDownloadJob('b.zip');
+    final first = _BlockingDownloadJob('${tempDir.path}/a.zip');
+    final second = _BlockingDownloadJob('${tempDir.path}/b.zip');
 
     manager.addJobForTesting(first);
     manager.addJobForTesting(second);
@@ -217,6 +218,7 @@ void main() {
     m1.addPackageFiles(
       groupName: 'Game 1.0',
       saveDir: tempDir.path,
+      cacheDir: cacheDir,
       files: [file('a.zip')],
     );
     m1.addSophonManifests(
@@ -234,6 +236,7 @@ void main() {
     final packageTask = m2.tasks.firstWhere((t) => t.displayName == 'a.zip');
     final sophonTask = m2.tasks.firstWhere((t) => t.displayName == '游戏资源');
     expect(packageTask.status, DownloadStatus.paused);
+    expect((packageTask as DownloadTask).cacheDir, cacheDir);
     expect(sophonTask.status, DownloadStatus.paused);
     expect(sophonTask.totalSize, 10);
     expect(sophonTask.savePath, '${tempDir.path}/game');
@@ -241,26 +244,39 @@ void main() {
   });
 
   test(
-    'AppSettings stores and resolves custom chunk cache directory',
+    'AppSettings stores cache directory and experimental chunk flag',
     () async {
       final prefs = await SharedPreferences.getInstance();
       final settings = AppSettings(prefs);
       final cacheDir = '${tempDir.path}/internal_cache';
 
+      expect(settings.experimentalChunkEnabled, isFalse);
+      expect(settings.packageCacheEnabled, isFalse);
+      expect(settings.resolvePackageCacheDir(), isNull);
       expect(
         settings.resolveChunkCacheDir('${tempDir.path}/download'),
         '${tempDir.path}/download/.sophon/chunks',
       );
 
-      await settings.setChunkCacheDir(cacheDir);
+      await settings.setExperimentalChunkEnabled(true);
+      expect(settings.experimentalChunkEnabled, isTrue);
+
+      await settings.setCacheDir(cacheDir);
+      expect(settings.customCacheDir, cacheDir);
       expect(settings.customChunkCacheDir, cacheDir);
+      expect(settings.resolvePackageCacheDir(), isNull);
       expect(
         settings.resolveChunkCacheDir('${tempDir.path}/download'),
         cacheDir,
       );
 
-      await settings.setChunkCacheDir(null);
-      expect(settings.customChunkCacheDir, isNull);
+      await settings.setPackageCacheEnabled(true);
+      expect(settings.packageCacheEnabled, isTrue);
+      expect(settings.resolvePackageCacheDir(), cacheDir);
+
+      await settings.setCacheDir(null);
+      expect(settings.customCacheDir, isNull);
+      expect(settings.resolvePackageCacheDir(), isNull);
     },
   );
 
@@ -289,11 +305,17 @@ void main() {
   });
 
   test(
-    'clearChunkCaches deletes inactive and orphan Sophon caches only',
+    'clearChunkCaches deletes inactive and orphan download caches only',
     () async {
       final cacheDir = '${tempDir.path}/internal_cache';
       final saveDir = '${tempDir.path}/download';
       final manager = DownloadManager(maxConcurrent: 0);
+      manager.addPackageFiles(
+        groupName: 'Game 1.0',
+        saveDir: saveDir,
+        cacheDir: cacheDir,
+        files: [file('a.zip')],
+      );
       manager.addSophonManifests(
         groupName: 'Game 1.0',
         saveDir: saveDir,
@@ -301,12 +323,16 @@ void main() {
         chunkCacheDir: cacheDir,
         manifests: [(sophonMeta(), const SophonChunkManifest(files: []))],
       );
-      final task = manager.tasks.single as SophonDownloadTask;
-      final cache = Directory(task.cacheDir);
+      final packageTask = manager.tasks.first as DownloadTask;
+      final sophonTask = manager.tasks.last as SophonDownloadTask;
+      final packageCache = File(packageTask.tmpPath);
+      final chunkCache = Directory(sophonTask.cacheDir);
       final orphanCache = Directory('$cacheDir/orphan');
-      final finalDir = Directory(task.savePath);
-      await cache.create(recursive: true);
-      await File('${cache.path}/chunk').writeAsBytes([1, 2, 3]);
+      final finalDir = Directory(sophonTask.savePath);
+      await packageCache.parent.create(recursive: true);
+      await packageCache.writeAsBytes([1, 2, 3]);
+      await chunkCache.create(recursive: true);
+      await File('${chunkCache.path}/chunk').writeAsBytes([1, 2, 3]);
       await orphanCache.create(recursive: true);
       await File('${orphanCache.path}/chunk').writeAsBytes([7, 8, 9]);
       await finalDir.create(recursive: true);
@@ -314,8 +340,9 @@ void main() {
 
       final count = await manager.clearChunkCaches(extraRoots: [cacheDir]);
 
-      expect(count, 2);
-      expect(await cache.exists(), isFalse);
+      expect(count, 3);
+      expect(await packageCache.exists(), isFalse);
+      expect(await chunkCache.exists(), isFalse);
       expect(await orphanCache.exists(), isFalse);
       expect(await finalDir.exists(), isTrue);
     },
@@ -330,6 +357,7 @@ void main() {
       m1.addPackageFiles(
         groupName: 'Game 1.0',
         saveDir: mobileDir,
+        cacheDir: '${tempDir.path}/internal_cache',
         files: [file('a.zip')],
       );
 
@@ -340,7 +368,9 @@ void main() {
       final exported =
           jsonDecode(await record.readAsString()) as Map<String, dynamic>;
       final tasks = exported['tasks'] as List<dynamic>;
-      expect((tasks.single as Map<String, dynamic>)['savePath'], 'a.zip');
+      final task = tasks.single as Map<String, dynamic>;
+      expect(task['savePath'], 'a.zip');
+      expect(task.containsKey('cacheDir'), isFalse);
 
       final pcDir = '${tempDir.path}/pc/Game_1.0';
       await Directory(pcDir).create(recursive: true);
@@ -387,6 +417,41 @@ void main() {
       );
     },
   );
+
+  test('removeAllTasks can keep records files or delete everything', () async {
+    final manager = DownloadManager(maxConcurrent: 0);
+    final cacheDir = '${tempDir.path}/internal_cache';
+    manager.addPackageFiles(
+      groupName: 'Game 1.0',
+      saveDir: tempDir.path,
+      cacheDir: cacheDir,
+      files: [file('a.zip'), file('b.zip')],
+    );
+    final firstTask = manager.tasks.first as DownloadTask;
+    final finalFile = File('${tempDir.path}/a.zip');
+    final cacheFile = File(firstTask.tmpPath);
+    await finalFile.writeAsBytes([1, 2, 3]);
+    await cacheFile.parent.create(recursive: true);
+    await cacheFile.writeAsBytes([4, 5, 6]);
+
+    await manager.removeAllTasks();
+
+    expect(manager.tasks, isEmpty);
+    expect(await finalFile.exists(), isTrue);
+    expect(await cacheFile.exists(), isTrue);
+
+    manager.addPackageFiles(
+      groupName: 'Game 1.0',
+      saveDir: tempDir.path,
+      cacheDir: cacheDir,
+      files: [file('a.zip')],
+    );
+    await manager.removeAllTasks(deleteFiles: true);
+
+    expect(manager.tasks, isEmpty);
+    expect(await finalFile.exists(), isFalse);
+    expect(await cacheFile.exists(), isFalse);
+  });
 
   test('removeTask can delete both task record and files', () async {
     final manager = DownloadManager(maxConcurrent: 0);

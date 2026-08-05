@@ -90,35 +90,35 @@ class _SettingsPageState extends State<SettingsPage> {
     await settings.setDownloadDir(null);
   }
 
-  Future<void> _pickChunkCacheDirectory() async {
+  Future<void> _pickCacheDirectory() async {
     final settings = context.read<AppSettings>();
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _busy = true);
     try {
       if (!await _ensureStoragePermission()) {
         messenger.showSnackBar(
-          const SnackBar(content: Text('未授予存储权限，无法写入缓存目录')),
+          const SnackBar(content: Text('未授予存储权限，无法写入高速缓存目录')),
         );
         return;
       }
       final path = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: '选择 Chunk 缓存目录',
+        dialogTitle: '选择高速缓存目录',
       );
       if (path == null) return;
       if (!await _isWritable(path)) {
         messenger.showSnackBar(SnackBar(content: Text('该目录不可写入：$path')));
         return;
       }
-      await settings.setChunkCacheDir(path);
-      messenger.showSnackBar(SnackBar(content: Text('Chunk 缓存目录已设置为：$path')));
+      await settings.setCacheDir(path);
+      messenger.showSnackBar(SnackBar(content: Text('高速缓存目录已设置为：$path')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _resetChunkCacheDirectory() async {
+  Future<void> _resetCacheDirectory() async {
     final settings = context.read<AppSettings>();
-    await settings.setChunkCacheDir(null);
+    await settings.setCacheDir(null);
   }
 
   Future<void> _clearChunkCaches() async {
@@ -128,9 +128,9 @@ class _SettingsPageState extends State<SettingsPage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('清理 Chunk 缓存'),
+        title: const Text('清理下载缓存'),
         content: const Text(
-          '将删除当前缓存目录下的 Chunk 缓存，以及未运行 Sophon 任务的旧缓存。'
+          '将删除当前高速缓存目录下的临时缓存，以及未运行任务的旧缓存。'
           '不会删除已下载的游戏文件，正在下载的任务缓存会保留。是否继续？',
         ),
         actions: [
@@ -205,8 +205,26 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+            child: Text('实验性功能', style: Theme.of(context).textTheme.titleSmall),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.science),
+            title: const Text('启用 Chunk 模式'),
+            subtitle: const Text('实验性功能。关闭时只使用压缩包模式，默认关闭。'),
+            value: settings.experimentalChunkEnabled,
+            onChanged: _busy ? null : settings.setExperimentalChunkEnabled,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.sd_storage),
+            title: const Text('启用压缩包高速缓存下载'),
+            subtitle: const Text('关闭时压缩包直接下载到下载目录；开启后先下载到高速缓存目录再复制。默认关闭。'),
+            value: settings.packageCacheEnabled,
+            onChanged: _busy ? null : settings.setPackageCacheEnabled,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
             child: Text(
-              'Chunk 缓存目录',
+              '高速缓存目录',
               style: Theme.of(context).textTheme.titleSmall,
             ),
           ),
@@ -217,11 +235,17 @@ class _SettingsPageState extends State<SettingsPage> {
             builder: (context, snapshot) {
               return ListTile(
                 leading: const Icon(Icons.storage),
-                title: Text(snapshot.data ?? '...'),
+                title: Text(
+                  settings.customCacheDir == null
+                      ? '未设置'
+                      : snapshot.data ?? '...',
+                ),
                 subtitle: Text(
-                  settings.customChunkCacheDir == null
-                      ? '默认（下载目录内）'
-                      : '自定义目录，建议选择手机内置高速存储',
+                  settings.customCacheDir == null
+                      ? '默认：Chunk 使用下载目录内缓存；压缩包直接写入下载目录'
+                      : settings.packageCacheEnabled
+                      ? '自定义目录，建议选择手机内置高速存储；压缩包会先下载到这里再复制到下载目录'
+                      : '自定义目录，建议选择手机内置高速存储；压缩包缓存下载开关关闭，仍直接写入下载目录',
                 ),
               );
             },
@@ -231,15 +255,15 @@ class _SettingsPageState extends State<SettingsPage> {
             child: Row(
               children: [
                 FilledButton.icon(
-                  onPressed: _busy ? null : _pickChunkCacheDirectory,
+                  onPressed: _busy ? null : _pickCacheDirectory,
                   icon: const Icon(Icons.folder_open),
                   label: const Text('选择缓存目录'),
                 ),
                 const SizedBox(width: 12),
                 TextButton(
-                  onPressed: settings.customChunkCacheDir == null
+                  onPressed: settings.customCacheDir == null
                       ? null
-                      : _resetChunkCacheDirectory,
+                      : _resetCacheDirectory,
                   child: const Text('恢复默认'),
                 ),
               ],
@@ -250,7 +274,7 @@ class _SettingsPageState extends State<SettingsPage> {
             child: OutlinedButton.icon(
               onPressed: _busy ? null : _clearChunkCaches,
               icon: const Icon(Icons.cleaning_services),
-              label: const Text('清理所有 Chunk 缓存'),
+              label: const Text('清理所有下载缓存'),
             ),
           ),
           const Padding(
@@ -258,8 +282,10 @@ class _SettingsPageState extends State<SettingsPage> {
             child: Text(
               '提示：\n'
               '• Android 上写入 SD 卡 / U 盘（OTG）需要授予“所有文件访问权限”。\n'
-              '• Chunk 缓存目录建议放在手机内置高速存储，下载目录可继续放在 U 盘。\n'
-              '• 清理缓存会删除当前缓存目录和旧任务目录里的 Chunk 缓存，不会删除已下载的游戏文件，正在下载的任务缓存会保留。\n'
+              '• Chunk 模式是实验性功能，需要在本页手动开启；默认使用压缩包模式。\n'
+              '• 高速缓存目录建议放在手机内置高速存储，下载目录可继续放在 U 盘。\n'
+              '• 压缩包高速缓存下载默认关闭；开启后才会先下载到缓存目录，校验通过后复制到下载目录。\n'
+              '• 清理缓存会删除当前缓存目录和旧任务目录里的临时缓存，不会删除已下载的游戏文件，正在下载的任务缓存会保留。\n'
               '• 更改目录只影响之后新添加的任务，进行中的任务仍写入原目录。',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),

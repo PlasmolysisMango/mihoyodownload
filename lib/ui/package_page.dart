@@ -43,21 +43,24 @@ class _PackagePageState extends State<PackagePage> {
       widget.region,
       widget.game.gameId,
     );
+    final settings = context.read<AppSettings>();
     SophonBuild? build;
-    try {
-      final branch = await client.getGameBranch(
-        widget.region,
-        widget.game.gameId,
-      );
-      if (branch != null && branch.main.packageId.isNotEmpty) {
-        build = await client.getSophonChunkBuild(
+    if (settings.experimentalChunkEnabled) {
+      try {
+        final branch = await client.getGameBranch(
           widget.region,
           widget.game.gameId,
-          branch.main,
         );
+        if (branch != null && branch.main.packageId.isNotEmpty) {
+          build = await client.getSophonChunkBuild(
+            widget.region,
+            widget.game.gameId,
+            branch.main,
+          );
+        }
+      } catch (_) {
+        // Keep package mode usable when Sophon is unavailable.
       }
-    } catch (_) {
-      // Keep package mode usable when Sophon is unavailable.
     }
     return _PackageData(package: await packageFuture, sophonBuild: build);
   }
@@ -94,11 +97,13 @@ class _PackagePageState extends State<PackagePage> {
 
   Future<void> _startPackageDownload(GamePackageResource resource) async {
     final manager = context.read<DownloadManager>();
+    final settings = context.read<AppSettings>();
     final navigator = Navigator.of(context);
     final saveDir = await _downloadSaveDir(resource.version);
     manager.addPackageFiles(
       groupName: '${widget.game.name} ${resource.version}',
       saveDir: saveDir,
+      cacheDir: settings.resolvePackageCacheDir(),
       files: _selectedPackages.toList(),
     );
     navigator.push(MaterialPageRoute(builder: (_) => const DownloadsPage()));

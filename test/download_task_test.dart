@@ -31,8 +31,10 @@ class _RangeServer {
       if (rangeHeader != null && rangeHeader.startsWith('bytes=')) {
         start = int.parse(rangeHeader.substring(6).split('-').first);
         request.response.statusCode = HttpStatus.partialContent;
-        request.response.headers.set(HttpHeaders.contentRangeHeader,
-            'bytes $start-${data.length - 1}/${data.length}');
+        request.response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes $start-${data.length - 1}/${data.length}',
+        );
       }
       request.response.headers.contentLength = data.length - start;
       try {
@@ -40,8 +42,9 @@ class _RangeServer {
           request.response.add(data.sublist(start));
         } else {
           for (int i = start; i < data.length; i += chunkSize) {
-            request.response
-                .add(data.sublist(i, min(i + chunkSize, data.length)));
+            request.response.add(
+              data.sublist(i, min(i + chunkSize, data.length)),
+            );
             await request.response.flush();
             await Future<void>.delayed(throttle!);
           }
@@ -70,8 +73,7 @@ void main() {
 
   Uint8List randomBytes(int length) {
     final rng = Random(42);
-    return Uint8List.fromList(
-        List.generate(length, (_) => rng.nextInt(256)));
+    return Uint8List.fromList(List.generate(length, (_) => rng.nextInt(256)));
   }
 
   test('downloads a file and verifies md5', () async {
@@ -96,6 +98,35 @@ void main() {
     expect(File('${savePath}_tmp').existsSync(), isFalse);
     await server.stop();
   });
+
+  test(
+    'downloads through custom cache directory then copies to final path',
+    () async {
+      final data = randomBytes(256 * 1024);
+      final server = _RangeServer(data);
+      final uri = await server.start();
+
+      final savePath = '${tempDir.path}/external/file.bin';
+      final cacheDir = '${tempDir.path}/internal_cache';
+      final task = DownloadTask(
+        url: uri.toString(),
+        savePath: savePath,
+        totalSize: data.length,
+        expectedMd5: hex.encode(md5.convert(data).bytes),
+        displayName: 'file.bin',
+        cacheDir: cacheDir,
+      );
+      final ok = await task.run();
+
+      expect(ok, isTrue);
+      expect(task.status, DownloadStatus.completed);
+      expect(await File(savePath).readAsBytes(), data);
+      expect(File('${savePath}_tmp').existsSync(), isFalse);
+      expect(File(task.tmpPath).existsSync(), isFalse);
+      expect(task.tmpPath.startsWith(cacheDir), isTrue);
+      await server.stop();
+    },
+  );
 
   test('resumes from existing tmp file with Range header', () async {
     final data = randomBytes(256 * 1024);
@@ -168,32 +199,34 @@ void main() {
     await server.stop();
   });
 
-  test('auto retries once from scratch after corrupted tmp md5 mismatch',
-      () async {
-    final data = randomBytes(128 * 1024);
-    final server = _RangeServer(data);
-    final uri = await server.start();
+  test(
+    'auto retries once from scratch after corrupted tmp md5 mismatch',
+    () async {
+      final data = randomBytes(128 * 1024);
+      final server = _RangeServer(data);
+      final uri = await server.start();
 
-    final savePath = '${tempDir.path}/file.bin';
-    // A full-size but corrupted tmp simulates a bad resume/CDN range result.
-    await File('${savePath}_tmp').writeAsBytes(List.filled(data.length, 2));
-    final task = DownloadTask(
-      url: uri.toString(),
-      savePath: savePath,
-      totalSize: data.length,
-      expectedMd5: hex.encode(md5.convert(data).bytes),
-      displayName: 'file.bin',
-    );
-    final ok = await task.run();
+      final savePath = '${tempDir.path}/file.bin';
+      // A full-size but corrupted tmp simulates a bad resume/CDN range result.
+      await File('${savePath}_tmp').writeAsBytes(List.filled(data.length, 2));
+      final task = DownloadTask(
+        url: uri.toString(),
+        savePath: savePath,
+        totalSize: data.length,
+        expectedMd5: hex.encode(md5.convert(data).bytes),
+        displayName: 'file.bin',
+      );
+      final ok = await task.run();
 
-    expect(ok, isTrue);
-    expect(task.status, DownloadStatus.completed);
-    expect(await File(savePath).readAsBytes(), data);
-    // No network request for the first bad tmp verification, then one clean
-    // redownload request after the mismatch is detected.
-    expect(server.requestCount, 1);
-    await server.stop();
-  });
+      expect(ok, isTrue);
+      expect(task.status, DownloadStatus.completed);
+      expect(await File(savePath).readAsBytes(), data);
+      // No network request for the first bad tmp verification, then one clean
+      // redownload request after the mismatch is detected.
+      expect(server.requestCount, 1);
+      await server.stop();
+    },
+  );
 
   test('rate limiter throttles a real transfer', () async {
     final data = randomBytes(512 * 1024);
@@ -226,8 +259,10 @@ void main() {
     final data = randomBytes(1024 * 1024);
     // Throttled server: 64 KB per 30 ms, the full file takes ~500 ms so the
     // pause below is guaranteed to land mid-transfer on any runner speed.
-    final server =
-        _RangeServer(data, throttle: const Duration(milliseconds: 30));
+    final server = _RangeServer(
+      data,
+      throttle: const Duration(milliseconds: 30),
+    );
     final uri = await server.start();
 
     final savePath = '${tempDir.path}/file.bin';
