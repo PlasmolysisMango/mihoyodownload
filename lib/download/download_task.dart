@@ -58,6 +58,22 @@ class DownloadTask extends DownloadJob {
   @override
   int get receivedBytes => _receivedBytes;
 
+  int _verificationBytes = 0;
+  @override
+  int get verificationBytes => _verificationBytes;
+
+  @override
+  double get verificationProgress =>
+      totalSize <= 0 ? 0 : _verificationBytes / totalSize;
+
+  int _publishingBytes = 0;
+  @override
+  int get publishingBytes => _publishingBytes;
+
+  @override
+  double get publishingProgress =>
+      totalSize <= 0 ? 0 : _publishingBytes / totalSize;
+
   @override
   double get progress => totalSize <= 0 ? 0 : _receivedBytes / totalSize;
 
@@ -93,7 +109,8 @@ class DownloadTask extends DownloadJob {
   @override
   bool get isActive =>
       _status == DownloadStatus.downloading ||
-      _status == DownloadStatus.verifying;
+      _status == DownloadStatus.verifying ||
+      _status == DownloadStatus.publishing;
 
   /// Runs the download until completion, pause or failure.
   /// Returns true when the file is completed and verified.
@@ -102,6 +119,8 @@ class DownloadTask extends DownloadJob {
     if (_status == DownloadStatus.completed) return true;
     _abortRequested = false;
     _error = null;
+    _verificationBytes = 0;
+    _publishingBytes = 0;
     _setStatus(DownloadStatus.downloading);
     try {
       final finalFile = File(savePath);
@@ -111,7 +130,7 @@ class DownloadTask extends DownloadJob {
         // file can have the correct length but wrong content.
         if (await finalFile.length() == totalSize) {
           _receivedBytes = totalSize;
-          _setStatus(DownloadStatus.verifying);
+          _beginVerifying();
           if (await _verifyMd5(finalFile)) {
             _setStatus(DownloadStatus.completed);
             return true;
@@ -133,7 +152,9 @@ class DownloadTask extends DownloadJob {
 
       if (await _hasValidatedCache(tmpFile)) {
         _receivedBytes = totalSize;
-        _setStatus(DownloadStatus.verifying);
+        _beginVerifying();
+        _verificationBytes = totalSize;
+        notifyListeners();
         await _publishCompletedFile(tmpFile);
         _setStatus(DownloadStatus.completed);
         return true;
@@ -148,7 +169,7 @@ class DownloadTask extends DownloadJob {
         }
       }
 
-      _setStatus(DownloadStatus.verifying);
+      _beginVerifying();
       if (await _verifyMd5(tmpFile)) {
         await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
@@ -236,7 +257,7 @@ class DownloadTask extends DownloadJob {
         _setStatus(DownloadStatus.paused);
         return false;
       }
-      _setStatus(DownloadStatus.verifying);
+      _beginVerifying();
       if (await _verifyMd5(tmpFile)) {
         await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
@@ -259,14 +280,28 @@ class DownloadTask extends DownloadJob {
   }
 
   Future<bool> _verifyMd5(File file) async {
-    if (expectedMd5.isEmpty) return true;
+    if (expectedMd5.isEmpty) {
+      _verificationBytes = totalSize;
+      notifyListeners();
+      return true;
+    }
     final output = AccumulatorSink<Digest>();
     final input = md5.startChunkedConversion(output);
+    var verified = 0;
+    var lastNotified = 0;
     await for (final chunk in file.openRead()) {
       if (_abortRequested) return false;
       input.add(chunk);
+      verified += chunk.length;
+      if (verified - lastNotified >= 512 * 1024 || verified >= totalSize) {
+        _verificationBytes = verified.clamp(0, totalSize).toInt();
+        lastNotified = verified;
+        notifyListeners();
+      }
     }
     input.close();
+    _verificationBytes = totalSize;
+    notifyListeners();
     return hex.encode(output.events.single.bytes) == expectedMd5;
   }
 
@@ -320,13 +355,34 @@ class DownloadTask extends DownloadJob {
   Future<void> _publishCompletedFile(File tmpFile) async {
     final finalFile = File(savePath);
     await finalFile.parent.create(recursive: true);
+    _beginPublishing();
     if (cacheDir == null || cacheDir!.isEmpty) {
       await tmpFile.rename(savePath);
+      _publishingBytes = totalSize;
+      notifyListeners();
       return;
     }
-    await tmpFile.copy(savePath);
+    await _copyFileToFinalPath(tmpFile, finalFile);
+    if (_abortRequested) throw const _PackagePausedException();
     await tmpFile.delete();
     await _clearValidatedCacheMarker();
+  }
+
+  Future<void> _copyFileToFinalPath(File tmpFile, File finalFile) async {
+    final sink = finalFile.openWrite(mode: FileMode.write);
+    try {
+      await for (final chunk in tmpFile.openRead()) {
+        if (_abortRequested) throw const _PackagePausedException();
+        sink.add(chunk);
+        _publishingBytes = (_publishingBytes + chunk.length)
+            .clamp(0, totalSize)
+            .toInt();
+        notifyListeners();
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
   }
 
   String _fileName(String path) => path.replaceAll('\\', '/').split('/').last;
@@ -335,7 +391,8 @@ class DownloadTask extends DownloadJob {
   @override
   void pause() {
     if (_status != DownloadStatus.downloading &&
-        _status != DownloadStatus.verifying) {
+        _status != DownloadStatus.verifying &&
+        _status != DownloadStatus.publishing) {
       return;
     }
     _abortRequested = true;
@@ -351,6 +408,8 @@ class DownloadTask extends DownloadJob {
     _client?.close();
     _client = null;
     _setStatus(DownloadStatus.canceled);
+    _verificationBytes = 0;
+    _publishingBytes = 0;
     try {
       final tmpFile = File(_tmpPath);
       if (await tmpFile.exists()) await tmpFile.delete();
@@ -365,6 +424,8 @@ class DownloadTask extends DownloadJob {
   void reset() {
     if (isActive) return;
     _error = null;
+    _verificationBytes = 0;
+    _publishingBytes = 0;
     _setStatus(DownloadStatus.queued);
   }
 
@@ -389,6 +450,16 @@ class DownloadTask extends DownloadJob {
     'status': status == DownloadStatus.completed ? 'completed' : 'paused',
   };
 
+  void _beginVerifying() {
+    _verificationBytes = 0;
+    _setStatus(DownloadStatus.verifying);
+  }
+
+  void _beginPublishing() {
+    _publishingBytes = 0;
+    _setStatus(DownloadStatus.publishing);
+  }
+
   void _setStatus(DownloadStatus value) {
     _status = value;
     notifyListeners();
@@ -398,4 +469,8 @@ class DownloadTask extends DownloadJob {
     _error = message;
     _setStatus(DownloadStatus.failed);
   }
+}
+
+class _PackagePausedException implements Exception {
+  const _PackagePausedException();
 }

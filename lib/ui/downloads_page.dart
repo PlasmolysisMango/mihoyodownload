@@ -161,6 +161,22 @@ class _TaskTile extends StatelessWidget {
             minHeight: 4,
             borderRadius: BorderRadius.circular(2),
           ),
+          if (task.status == DownloadStatus.verifying) ...[
+            const SizedBox(height: 4),
+            LinearProgressIndicator(
+              value: task.verificationProgress,
+              minHeight: 3,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ],
+          if (task.status == DownloadStatus.publishing) ...[
+            const SizedBox(height: 4),
+            LinearProgressIndicator(
+              value: task.publishingProgress,
+              minHeight: 3,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ],
           const SizedBox(height: 4),
           Text(
             '${task.groupName} · ${_statusText(task)}'
@@ -198,6 +214,7 @@ class _TaskTile extends StatelessWidget {
     switch (task.status) {
       case DownloadStatus.downloading:
       case DownloadStatus.verifying:
+      case DownloadStatus.publishing:
         return IconButton(
           tooltip: '暂停',
           icon: const Icon(Icons.pause),
@@ -262,7 +279,9 @@ class _TaskTile extends StatelessWidget {
       case DownloadStatus.paused:
         return '已暂停';
       case DownloadStatus.verifying:
-        return '校验中';
+        return '校验中 ${(task.verificationProgress * 100).clamp(0, 100).toStringAsFixed(1)}%';
+      case DownloadStatus.publishing:
+        return '复制中 ${(task.publishingProgress * 100).clamp(0, 100).toStringAsFixed(1)}%';
       case DownloadStatus.completed:
         return '已完成';
       case DownloadStatus.failed:

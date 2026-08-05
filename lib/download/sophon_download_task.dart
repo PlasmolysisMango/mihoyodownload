@@ -50,6 +50,8 @@ class SophonDownloadTask extends DownloadJob {
   int _lastNetworkBytes = 0;
   int _networkBytes = 0;
   int _receivedBytes = 0;
+  int _verificationBytes = 0;
+  int _verificationTotalBytes = 0;
   double _speed = 0;
   String? _error;
   DownloadStatus _status = DownloadStatus.queued;
@@ -62,6 +64,14 @@ class SophonDownloadTask extends DownloadJob {
 
   @override
   int get receivedBytes => _receivedBytes;
+
+  @override
+  int get verificationBytes => _verificationBytes;
+
+  @override
+  double get verificationProgress => _verificationTotalBytes <= 0
+      ? 0
+      : _verificationBytes / _verificationTotalBytes;
 
   @override
   double get progress => totalSize <= 0 ? 0 : _receivedBytes / totalSize;
@@ -94,6 +104,8 @@ class SophonDownloadTask extends DownloadJob {
     _abortRequested = false;
     _error = null;
     _receivedBytes = 0;
+    _verificationBytes = 0;
+    _verificationTotalBytes = 0;
     _networkBytes = 0;
     _lastNetworkBytes = 0;
     _setStatus(DownloadStatus.downloading);
@@ -111,23 +123,36 @@ class SophonDownloadTask extends DownloadJob {
           0,
           (sum, c) => sum + c.compressedSize,
         );
-        if (await _isFinalFileValid(file)) {
+        final progressBase = _receivedBytes;
+        _beginVerifying();
+        if (await _isFinalFileValid(file, progressSize: fileCompressedSize)) {
           _receivedBytes += fileCompressedSize;
           notifyListeners();
           continue;
         }
+        _receivedBytes = progressBase;
+        _setStatus(DownloadStatus.downloading);
         await _assembleFile(file);
         if (_abortRequested) return _pause();
-        if (!await _isFinalFileValid(file)) {
+        _beginVerifying();
+        if (!await _isFinalFileValid(file, progressSize: fileCompressedSize)) {
           // Reassemble once from cached, independently verified chunks. This
           // handles a transient write failure without network redownload.
           final target = File(_targetPath(file.file));
           if (await target.exists()) await target.delete();
+          _receivedBytes = progressBase;
+          _setStatus(DownloadStatus.downloading);
           await _assembleFile(file, countProgress: false);
-          if (!await _isFinalFileValid(file)) {
+          _beginVerifying();
+          if (!await _isFinalFileValid(
+            file,
+            progressSize: fileCompressedSize,
+          )) {
             _fail('文件校验失败：${file.file}');
             return false;
           }
+          _receivedBytes = progressBase + fileCompressedSize;
+          notifyListeners();
         }
         await _deleteChunkCache(file);
       }
@@ -325,12 +350,15 @@ class SophonDownloadTask extends DownloadJob {
     if (_abortRequested) throw const _SophonPausedException();
   }
 
-  Future<bool> _isFinalFileValid(SophonFile file) async {
+  Future<bool> _isFinalFileValid(SophonFile file, {int? progressSize}) async {
     final target = File(_targetPath(file.file));
     if (!await target.exists()) return false;
     if (await target.length() != file.size) return false;
-    if (file.md5.isEmpty) return true;
-    final hash = await _fileMd5(target);
+    if (file.md5.isEmpty) {
+      _setVerifyProgress(progressSize, file.size, file.size);
+      return true;
+    }
+    final hash = await _fileMd5(target, progressSize: progressSize);
     return hash == file.md5;
   }
 
@@ -396,6 +424,8 @@ class SophonDownloadTask extends DownloadJob {
     _client = null;
     _setStatus(DownloadStatus.canceled);
     _receivedBytes = 0;
+    _verificationBytes = 0;
+    _verificationTotalBytes = 0;
     notifyListeners();
   }
 
@@ -403,6 +433,8 @@ class SophonDownloadTask extends DownloadJob {
   void reset() {
     if (isActive) return;
     _error = null;
+    _verificationBytes = 0;
+    _verificationTotalBytes = 0;
     _setStatus(DownloadStatus.queued);
   }
 
@@ -433,6 +465,40 @@ class SophonDownloadTask extends DownloadJob {
     _error = message;
     _setStatus(DownloadStatus.failed);
   }
+
+  void _beginVerifying() {
+    _verificationBytes = 0;
+    _verificationTotalBytes = 0;
+    _setStatus(DownloadStatus.verifying);
+  }
+
+  void _setVerifyProgress(int? progressSize, int processed, int total) {
+    if (progressSize == null || total <= 0) return;
+    _verificationTotalBytes = progressSize;
+    final phaseBytes = (processed / total * progressSize).round();
+    _verificationBytes = phaseBytes.clamp(0, totalSize).toInt();
+    notifyListeners();
+  }
+
+  Future<String> _fileMd5(File file, {int? progressSize}) async {
+    final output = AccumulatorSink<Digest>();
+    final input = md5.startChunkedConversion(output);
+    final total = await file.length();
+    var verified = 0;
+    var lastNotified = 0;
+    await for (final chunk in file.openRead()) {
+      if (_abortRequested) throw const _SophonPausedException();
+      input.add(chunk);
+      verified += chunk.length;
+      if (verified - lastNotified >= 512 * 1024 || verified >= total) {
+        _setVerifyProgress(progressSize, verified, total);
+        lastNotified = verified;
+      }
+    }
+    input.close();
+    _setVerifyProgress(progressSize, total, total);
+    return hex.encode(output.events.single.bytes);
+  }
 }
 
 class _SophonPausedException implements Exception {
@@ -447,13 +513,3 @@ class _PreparedSophonChunk {
 }
 
 String _md5Hex(Uint8List bytes) => hex.encode(md5.convert(bytes).bytes);
-
-Future<String> _fileMd5(File file) async {
-  final output = AccumulatorSink<Digest>();
-  final input = md5.startChunkedConversion(output);
-  await for (final chunk in file.openRead()) {
-    input.add(chunk);
-  }
-  input.close();
-  return hex.encode(output.events.single.bytes);
-}

@@ -99,6 +99,38 @@ void main() {
     await server.stop();
   });
 
+  test('reports progress while verifying package md5', () async {
+    final data = randomBytes(2 * 1024 * 1024);
+    final server = _RangeServer(data);
+    final uri = await server.start();
+
+    final savePath = '${tempDir.path}/file.bin';
+    final task = DownloadTask(
+      url: uri.toString(),
+      savePath: savePath,
+      totalSize: data.length,
+      expectedMd5: hex.encode(md5.convert(data).bytes),
+      displayName: 'file.bin',
+    );
+    final verifyingProgress = <int>[];
+    final downloadProgressDuringVerify = <int>[];
+    task.addListener(() {
+      if (task.status == DownloadStatus.verifying) {
+        verifyingProgress.add(task.verificationBytes);
+        downloadProgressDuringVerify.add(task.receivedBytes);
+      }
+    });
+
+    final ok = await task.run();
+
+    expect(ok, isTrue);
+    expect(verifyingProgress, contains(0));
+    expect(verifyingProgress.where((value) => value > 0), isNotEmpty);
+    expect(verifyingProgress.last, data.length);
+    expect(downloadProgressDuringVerify.toSet(), {data.length});
+    await server.stop();
+  });
+
   test(
     'downloads through custom cache directory then copies to final path',
     () async {
@@ -116,6 +148,12 @@ void main() {
         displayName: 'file.bin',
         cacheDir: cacheDir,
       );
+      final publishingProgress = <int>[];
+      task.addListener(() {
+        if (task.status == DownloadStatus.publishing) {
+          publishingProgress.add(task.publishingBytes);
+        }
+      });
       final ok = await task.run();
 
       expect(ok, isTrue);
@@ -124,6 +162,9 @@ void main() {
       expect(File('${savePath}_tmp').existsSync(), isFalse);
       expect(File(task.tmpPath).existsSync(), isFalse);
       expect(task.tmpPath.startsWith(cacheDir), isTrue);
+      expect(publishingProgress, contains(0));
+      expect(publishingProgress.where((value) => value > 0), isNotEmpty);
+      expect(publishingProgress.last, data.length);
       await server.stop();
     },
   );
