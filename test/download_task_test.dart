@@ -134,7 +134,7 @@ void main() {
   test(
     'downloads through custom cache directory then copies to final path',
     () async {
-      final data = randomBytes(256 * 1024);
+      final data = randomBytes(2 * 1024 * 1024);
       final server = _RangeServer(data);
       final uri = await server.start();
 
@@ -149,9 +149,12 @@ void main() {
         cacheDir: cacheDir,
       );
       final publishingProgress = <int>[];
+      final publishedFileLengths = <int>[];
       task.addListener(() {
         if (task.status == DownloadStatus.publishing) {
           publishingProgress.add(task.publishingBytes);
+          final file = File(savePath);
+          publishedFileLengths.add(file.existsSync() ? file.lengthSync() : 0);
         }
       });
       final ok = await task.run();
@@ -165,6 +168,12 @@ void main() {
       expect(publishingProgress, contains(0));
       expect(publishingProgress.where((value) => value > 0), isNotEmpty);
       expect(publishingProgress.last, data.length);
+      for (var i = 0; i < publishingProgress.length; i++) {
+        expect(
+          publishingProgress[i],
+          lessThanOrEqualTo(publishedFileLengths[i]),
+        );
+      }
       await server.stop();
     },
   );

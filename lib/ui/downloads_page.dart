@@ -281,7 +281,7 @@ class _TaskTile extends StatelessWidget {
       case DownloadStatus.verifying:
         return '校验中 ${(task.verificationProgress * 100).clamp(0, 100).toStringAsFixed(1)}%';
       case DownloadStatus.publishing:
-        return '复制中 ${(task.publishingProgress * 100).clamp(0, 100).toStringAsFixed(1)}%';
+        return '复制中 ${(task.publishingProgress * 100).clamp(0, 100).toStringAsFixed(1)}% · 速度 ${formatSpeed(task.speed)}';
       case DownloadStatus.completed:
         return '已完成';
       case DownloadStatus.failed:

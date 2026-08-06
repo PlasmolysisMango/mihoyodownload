@@ -9,6 +9,8 @@ import 'package:http/http.dart' as http;
 import 'download_job.dart';
 import 'rate_limiter.dart';
 
+const _publishCopyChunkSize = 4 * 1024 * 1024;
+
 /// Downloads one file with HTTP range resume and streaming MD5 verification.
 ///
 /// Ported from Starward's `GameInstallHelper.DownloadToFileAsync`:
@@ -369,19 +371,31 @@ class DownloadTask extends DownloadJob {
   }
 
   Future<void> _copyFileToFinalPath(File tmpFile, File finalFile) async {
-    final sink = finalFile.openWrite(mode: FileMode.write);
+    final source = await tmpFile.open(mode: FileMode.read);
+    final target = await finalFile.open(mode: FileMode.write);
+    int lastBytes = _publishingBytes;
+    final speedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _speed = (_publishingBytes - lastBytes).toDouble();
+      lastBytes = _publishingBytes;
+      notifyListeners();
+    });
     try {
-      await for (final chunk in tmpFile.openRead()) {
+      await target.truncate(0);
+      while (true) {
         if (_abortRequested) throw const _PackagePausedException();
-        sink.add(chunk);
+        final chunk = await source.read(_publishCopyChunkSize);
+        if (chunk.isEmpty) break;
+        await target.writeFrom(chunk);
         _publishingBytes = (_publishingBytes + chunk.length)
             .clamp(0, totalSize)
             .toInt();
         notifyListeners();
       }
-      await sink.flush();
+      await target.flush();
     } finally {
-      await sink.close();
+      speedTimer.cancel();
+      await source.close();
+      await target.close();
     }
   }
 
