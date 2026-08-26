@@ -16,9 +16,14 @@ import 'sophon_download_task.dart';
 /// The task list survives app restarts: metadata goes to SharedPreferences,
 /// while the `_tmp` files on disk keep the resumable download progress.
 class DownloadManager extends ChangeNotifier {
-  DownloadManager({int maxConcurrent = 2, SharedPreferences? prefs})
-    : _maxConcurrent = maxConcurrent,
-      _prefs = prefs;
+  DownloadManager({
+    int maxConcurrent = 2,
+    bool continueDownloadsDuringFinalization = false,
+    SharedPreferences? prefs,
+  }) : _maxConcurrent = maxConcurrent,
+       _continueDownloadsDuringFinalization =
+           continueDownloadsDuringFinalization,
+       _prefs = prefs;
 
   static const _kTasksKey = 'download_tasks';
   static const portableTaskRecordFileName = '.hoyo_download_tasks.json';
@@ -26,9 +31,19 @@ class DownloadManager extends ChangeNotifier {
   /// Max files downloading at the same time; adjustable at runtime.
   /// Lowering it never interrupts running tasks, they just drain naturally.
   int _maxConcurrent;
+  bool _continueDownloadsDuringFinalization;
   int get maxConcurrent => _maxConcurrent;
   set maxConcurrent(int value) {
     _maxConcurrent = value.clamp(1, 8);
+    notifyListeners();
+    _pump();
+  }
+
+  /// When enabled, tasks in verification/copy phases no longer block queued downloads.
+  bool get continueDownloadsDuringFinalization =>
+      _continueDownloadsDuringFinalization;
+  set continueDownloadsDuringFinalization(bool value) {
+    _continueDownloadsDuringFinalization = value;
     notifyListeners();
     _pump();
   }
@@ -50,13 +65,13 @@ class DownloadManager extends ChangeNotifier {
 
   @visibleForTesting
   void addJobForTesting(DownloadJob task) {
-    task.addListener(notifyListeners);
+    _attachTask(task);
     _tasks.add(task);
     notifyListeners();
     _pump();
   }
 
-  int get activeCount => _tasks.where((t) => t.isActive).length;
+  int get activeCount => _tasks.where(_occupiesQueueSlot).length;
 
   int get totalSize => _tasks.fold(0, (s, t) => s + t.totalSize);
 
@@ -88,7 +103,7 @@ class DownloadManager extends ChangeNotifier {
         cacheDir: cacheDir,
         rateLimiter: rateLimiter,
       );
-      task.addListener(notifyListeners);
+      _attachTask(task);
       _tasks.add(task);
     }
     _persist();
@@ -120,7 +135,7 @@ class DownloadManager extends ChangeNotifier {
         chunkCacheDir: chunkCacheDir,
         rateLimiter: rateLimiter,
       );
-      task.addListener(notifyListeners);
+      _attachTask(task);
       _tasks.add(task);
     }
     _persist();
@@ -144,7 +159,7 @@ class DownloadManager extends ChangeNotifier {
       final task = await _taskFromJson(e);
       if (task == null || _hasDuplicate(task)) continue;
       _portableRoots.add(_portableRootForTask(task));
-      task.addListener(notifyListeners);
+      _attachTask(task);
       _tasks.add(task);
     }
     notifyListeners();
@@ -194,7 +209,7 @@ class DownloadManager extends ChangeNotifier {
       final task = await _taskFromJson(e, portableRoot: root);
       if (task == null || _hasDuplicate(task)) continue;
       _portableRoots.add(root);
-      task.addListener(notifyListeners);
+      _attachTask(task);
       _tasks.add(task);
       added++;
     }
@@ -304,6 +319,28 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  bool _occupiesQueueSlot(DownloadJob task) {
+    if (_continueDownloadsDuringFinalization) {
+      return task.consumesDownloadSlot;
+    }
+    return task.isActive;
+  }
+
+  void _attachTask(DownloadJob task) {
+    task.addListener(_onTaskChanged);
+  }
+
+  void _detachTask(DownloadJob task) {
+    task.removeListener(_onTaskChanged);
+  }
+
+  void _onTaskChanged() {
+    notifyListeners();
+    if (_continueDownloadsDuringFinalization) {
+      _pump();
+    }
+  }
+
   /// Starts queued tasks while below the concurrency limit.
   void _pump() {
     for (final task in _tasks) {
@@ -351,7 +388,7 @@ class DownloadManager extends ChangeNotifier {
     } else if (task.isActive) {
       task.pause();
     }
-    task.removeListener(notifyListeners);
+    _detachTask(task);
     _tasks.remove(task);
     _persist();
     notifyListeners();
@@ -367,7 +404,7 @@ class DownloadManager extends ChangeNotifier {
       } else if (task.isActive) {
         task.pause();
       }
-      task.removeListener(notifyListeners);
+      _detachTask(task);
     }
     _tasks.clear();
     _persist();
@@ -395,7 +432,7 @@ class DownloadManager extends ChangeNotifier {
       final removable =
           t.status == DownloadStatus.completed ||
           t.status == DownloadStatus.canceled;
-      if (removable) t.removeListener(notifyListeners);
+      if (removable) _detachTask(t);
       return removable;
     });
     _persist();
@@ -477,6 +514,8 @@ class DownloadManager extends ChangeNotifier {
       if (task is DownloadTask) {
         final finalFile = File(task.savePath);
         if (await finalFile.exists()) await finalFile.delete();
+        final finalMarker = File(task.finalVerifiedMarkerPath);
+        if (await finalMarker.exists()) await finalMarker.delete();
         final tmpFile = File(task.tmpPath);
         if (await tmpFile.exists()) await tmpFile.delete();
         final markerPath = task.validatedCacheMarkerPath;

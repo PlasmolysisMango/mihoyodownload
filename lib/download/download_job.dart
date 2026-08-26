@@ -42,6 +42,9 @@ abstract class DownloadJob extends ChangeNotifier {
       status == DownloadStatus.verifying ||
       status == DownloadStatus.publishing;
 
+  /// Whether this task is still consuming a network download concurrency slot.
+  bool get consumesDownloadSlot => status == DownloadStatus.downloading;
+
   Future<bool> run();
   void pause();
   Future<void> cancel();

@@ -99,6 +99,111 @@ class _BlockingDownloadJob extends DownloadJob {
   };
 }
 
+class _FinalizingDownloadJob extends DownloadJob {
+  _FinalizingDownloadJob(this.displayName);
+
+  final Completer<void> started = Completer<void>();
+  final Completer<void> enteredFinalization = Completer<void>();
+  final Completer<void> _downloadFinished = Completer<void>();
+  final Completer<void> _finalizationFinished = Completer<void>();
+
+  DownloadStatus _status = DownloadStatus.queued;
+
+  @override
+  String get savePath => displayName;
+
+  @override
+  int get totalSize => 1;
+
+  @override
+  int get receivedBytes => _status == DownloadStatus.queued ? 0 : 1;
+
+  @override
+  double get progress => receivedBytes / totalSize;
+
+  @override
+  double get speed => 0;
+
+  @override
+  String? get error => null;
+
+  @override
+  final String displayName;
+
+  @override
+  String get groupName => 'test';
+
+  @override
+  DownloadStatus get status => _status;
+
+  @override
+  Future<bool> run() async {
+    _status = DownloadStatus.downloading;
+    notifyListeners();
+    if (!started.isCompleted) started.complete();
+    await _downloadFinished.future;
+    if (_status == DownloadStatus.canceled ||
+        _status == DownloadStatus.paused) {
+      return false;
+    }
+    _status = DownloadStatus.verifying;
+    notifyListeners();
+    if (!enteredFinalization.isCompleted) enteredFinalization.complete();
+    await _finalizationFinished.future;
+    if (_status == DownloadStatus.canceled ||
+        _status == DownloadStatus.paused) {
+      return false;
+    }
+    _status = DownloadStatus.completed;
+    notifyListeners();
+    return true;
+  }
+
+  void finishDownload() {
+    if (!_downloadFinished.isCompleted) _downloadFinished.complete();
+  }
+
+  void finishFinalization() {
+    if (!_finalizationFinished.isCompleted) _finalizationFinished.complete();
+  }
+
+  @override
+  void pause() {
+    if (!isActive) return;
+    _status = DownloadStatus.paused;
+    finishDownload();
+    finishFinalization();
+    notifyListeners();
+  }
+
+  @override
+  Future<void> cancel() async {
+    _status = DownloadStatus.canceled;
+    finishDownload();
+    finishFinalization();
+    notifyListeners();
+  }
+
+  @override
+  void reset() {
+    if (isActive) return;
+    _status = DownloadStatus.queued;
+    notifyListeners();
+  }
+
+  @override
+  void restoreState(DownloadStatus status, int receivedBytes) {
+    _status = status;
+  }
+
+  @override
+  Map<String, dynamic> toPersistedJson() => {
+    'type': 'test',
+    'savePath': savePath,
+    'displayName': displayName,
+  };
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -211,6 +316,56 @@ void main() {
     expect(second.started.isCompleted, isFalse);
   });
 
+  test(
+    'finalizing task keeps queue slot when the setting is disabled',
+    () async {
+      final manager = DownloadManager(maxConcurrent: 1);
+      final first = _FinalizingDownloadJob('${tempDir.path}/a.zip');
+      final second = _BlockingDownloadJob('${tempDir.path}/b.zip');
+
+      manager.addJobForTesting(first);
+      manager.addJobForTesting(second);
+      await first.started.future;
+      first.finishDownload();
+      await first.enteredFinalization.future;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(first.status, DownloadStatus.verifying);
+      expect(second.status, DownloadStatus.queued);
+      expect(second.started.isCompleted, isFalse);
+
+      first.finishFinalization();
+      await second.started.future;
+      await manager.cancel(second);
+    },
+  );
+
+  test(
+    'finalizing task releases queue slot when the setting is enabled',
+    () async {
+      final manager = DownloadManager(
+        maxConcurrent: 1,
+        continueDownloadsDuringFinalization: true,
+      );
+      final first = _FinalizingDownloadJob('${tempDir.path}/a.zip');
+      final second = _BlockingDownloadJob('${tempDir.path}/b.zip');
+
+      manager.addJobForTesting(first);
+      manager.addJobForTesting(second);
+      await first.started.future;
+      first.finishDownload();
+      await first.enteredFinalization.future;
+      await second.started.future;
+
+      expect(first.status, DownloadStatus.verifying);
+      expect(second.status, DownloadStatus.downloading);
+      expect(manager.activeCount, 1);
+
+      await manager.cancel(first);
+      await manager.cancel(second);
+    },
+  );
+
   test('persists and restores mixed package and Sophon tasks', () async {
     final prefs = await SharedPreferences.getInstance();
     final cacheDir = '${tempDir.path}/fast_cache';
@@ -252,6 +407,7 @@ void main() {
 
       expect(settings.experimentalChunkEnabled, isFalse);
       expect(settings.packageCacheEnabled, isFalse);
+      expect(settings.continueDownloadsDuringFinalization, isFalse);
       expect(settings.resolvePackageCacheDir(), isNull);
       expect(
         settings.resolveChunkCacheDir('${tempDir.path}/download'),
@@ -273,6 +429,9 @@ void main() {
       await settings.setPackageCacheEnabled(true);
       expect(settings.packageCacheEnabled, isTrue);
       expect(settings.resolvePackageCacheDir(), cacheDir);
+
+      await settings.setContinueDownloadsDuringFinalization(true);
+      expect(settings.continueDownloadsDuringFinalization, isTrue);
 
       await settings.setCacheDir(null);
       expect(settings.customCacheDir, isNull);

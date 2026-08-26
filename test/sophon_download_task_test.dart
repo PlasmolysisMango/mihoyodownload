@@ -170,6 +170,66 @@ void main() {
     await server.stop();
   });
 
+  test(
+    'reuses verified Sophon final file marker without hashing again',
+    () async {
+      final raw1 = Uint8List.fromList(List.filled(1024 * 1024, 1));
+      final raw2 = Uint8List.fromList(List.filled(1024 * 1024, 2));
+      final (baseMeta, manifest, chunks) = await fixture(
+        raw1Override: raw1,
+        raw2Override: raw2,
+      );
+      final server = _ChunkServer(chunks);
+      final baseUrl = await server.start();
+      final meta = SophonManifestMeta.fromPersistedJson({
+        ...baseMeta.toJson(),
+        'chunkUrlPrefix': baseUrl.toString(),
+        'compressedSize': chunks.values.fold<int>(0, (s, b) => s + b.length),
+      });
+      final first = SophonDownloadTask(
+        meta: meta,
+        initialManifest: manifest,
+        saveDir: tempDir.path,
+        version: '1.0',
+        groupName: 'Test 1.0',
+        zstdCodec: const _FakeZstdCodec(),
+      );
+
+      expect(await first.run(), isTrue);
+      expect(
+        File('${tempDir.path}/Game/file.txt.verified').existsSync(),
+        isTrue,
+      );
+
+      final second = SophonDownloadTask(
+        meta: meta,
+        initialManifest: manifest,
+        saveDir: tempDir.path,
+        version: '1.0',
+        groupName: 'Test 1.0',
+        zstdCodec: const _FakeZstdCodec(),
+      );
+      final verifyingProgress = <int>[];
+      second.addListener(() {
+        if (second.status == DownloadStatus.verifying) {
+          verifyingProgress.add(second.verificationBytes);
+        }
+      });
+
+      expect(await second.run(), isTrue);
+
+      final expectedProgress = chunks.values.fold<int>(
+        0,
+        (s, b) => s + b.length,
+      );
+      expect(verifyingProgress.first, 0);
+      expect(verifyingProgress.where((value) => value > 0).toSet(), {
+        expectedProgress,
+      });
+      await server.stop();
+    },
+  );
+
   test('stores large chunk cache in custom cache directory', () async {
     final raw1 = Uint8List.fromList(List.filled(9 * 1024 * 1024, 1));
     final (baseMeta, manifest, chunks) = await fixture(raw1Override: raw1);

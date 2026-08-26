@@ -106,6 +106,9 @@ class DownloadTask extends DownloadJob {
     return '$tmpPath.verified';
   }
 
+  /// Sidecar marker written only after the final file passed verification.
+  String get finalVerifiedMarkerPath => '$savePath.verified';
+
   String get _tmpPath => tmpPath;
 
   @override
@@ -127,17 +130,25 @@ class DownloadTask extends DownloadJob {
     try {
       final finalFile = File(savePath);
       if (await finalFile.exists()) {
-        // Already downloaded before (e.g. app restart); verify it instead of
-        // trusting the size only. A previously failed disk write or a stale
-        // file can have the correct length but wrong content.
+        // Already downloaded before (e.g. app restart); reuse the previous
+        // successful verification only when the final file metadata still
+        // matches, otherwise verify the content again.
         if (await finalFile.length() == totalSize) {
           _receivedBytes = totalSize;
           _beginVerifying();
+          if (await _hasValidatedFinalFile(finalFile)) {
+            _verificationBytes = totalSize;
+            notifyListeners();
+            _setStatus(DownloadStatus.completed);
+            return true;
+          }
           if (await _verifyMd5(finalFile)) {
+            await _markValidatedFinalFile(finalFile);
             _setStatus(DownloadStatus.completed);
             return true;
           }
         }
+        await _clearValidatedFinalFileMarker();
         await finalFile.delete();
       }
 
@@ -158,6 +169,7 @@ class DownloadTask extends DownloadJob {
         _verificationBytes = totalSize;
         notifyListeners();
         await _publishCompletedFile(tmpFile);
+        await _markValidatedFinalFile(File(savePath));
         _setStatus(DownloadStatus.completed);
         return true;
       }
@@ -175,6 +187,7 @@ class DownloadTask extends DownloadJob {
       if (await _verifyMd5(tmpFile)) {
         await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
+        await _markValidatedFinalFile(File(savePath));
         _setStatus(DownloadStatus.completed);
         return true;
       } else {
@@ -263,6 +276,7 @@ class DownloadTask extends DownloadJob {
       if (await _verifyMd5(tmpFile)) {
         await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
+        await _markValidatedFinalFile(File(savePath));
         _setStatus(DownloadStatus.completed);
         return true;
       }
@@ -305,6 +319,44 @@ class DownloadTask extends DownloadJob {
     _verificationBytes = totalSize;
     notifyListeners();
     return hex.encode(output.events.single.bytes) == expectedMd5;
+  }
+
+  Future<bool> _hasValidatedFinalFile(File file) async {
+    if (!await file.exists() || await file.length() != totalSize) return false;
+    final marker = File(finalVerifiedMarkerPath);
+    if (!await marker.exists()) return false;
+    try {
+      final data = jsonDecode(await marker.readAsString());
+      if (data is! Map<String, dynamic>) return false;
+      final stat = await file.stat();
+      return data['savePath'] == savePath &&
+          data['totalSize'] == totalSize &&
+          data['expectedMd5'] == expectedMd5 &&
+          data['modifiedMillis'] == stat.modified.millisecondsSinceEpoch;
+    } catch (_) {
+      await _clearValidatedFinalFileMarker();
+      return false;
+    }
+  }
+
+  Future<void> _markValidatedFinalFile(File file) async {
+    if (!await file.exists()) return;
+    final marker = File(finalVerifiedMarkerPath);
+    final stat = await file.stat();
+    await marker.parent.create(recursive: true);
+    await marker.writeAsString(
+      jsonEncode({
+        'savePath': savePath,
+        'totalSize': totalSize,
+        'expectedMd5': expectedMd5,
+        'modifiedMillis': stat.modified.millisecondsSinceEpoch,
+      }),
+    );
+  }
+
+  Future<void> _clearValidatedFinalFileMarker() async {
+    final marker = File(finalVerifiedMarkerPath);
+    if (await marker.exists()) await marker.delete();
   }
 
   Future<bool> _hasValidatedCache(File tmpFile) async {

@@ -313,6 +313,21 @@ class _SettingsPageState extends State<SettingsPage> {
               },
             ),
           ),
+          SwitchListTile(
+            secondary: const Icon(Icons.playlist_play),
+            title: const Text('校验/复制时继续后续下载'),
+            subtitle: const Text('开启后，任务完成网络下载并进入校验或复制阶段时，不再占用同时下载任务数；默认关闭。'),
+            value: settings.continueDownloadsDuringFinalization,
+            onChanged: _busy
+                ? null
+                : (value) {
+                    settings.setContinueDownloadsDuringFinalization(value);
+                    context
+                            .read<DownloadManager>()
+                            .continueDownloadsDuringFinalization =
+                        value;
+                  },
+          ),
           ListTile(
             leading: const Icon(Icons.speed),
             title: const Text('下载限速'),

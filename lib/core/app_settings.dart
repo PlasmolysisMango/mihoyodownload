@@ -12,6 +12,8 @@ class AppSettings extends ChangeNotifier {
   static const _kCacheDir = 'chunk_cache_dir';
   static const _kExperimentalChunk = 'experimental_chunk_enabled';
   static const _kPackageCacheEnabled = 'package_cache_enabled';
+  static const _kContinueDownloadsDuringFinalization =
+      'continue_downloads_during_finalization';
   static const _kMaxConcurrent = 'max_concurrent';
   static const _kSpeedLimit = 'speed_limit_bps';
 
@@ -33,6 +35,10 @@ class AppSettings extends ChangeNotifier {
   /// Package cache downloading is disabled by default.
   bool get packageCacheEnabled =>
       _prefs.getBool(_kPackageCacheEnabled) ?? false;
+
+  /// Whether verification/copy phases should free the download queue slot.
+  bool get continueDownloadsDuringFinalization =>
+      _prefs.getBool(_kContinueDownloadsDuringFinalization) ?? false;
 
   /// The effective download root: the custom directory when set,
   /// otherwise `<app documents>/downloads`.
@@ -94,6 +100,11 @@ class AppSettings extends ChangeNotifier {
 
   Future<void> setPackageCacheEnabled(bool value) async {
     await _prefs.setBool(_kPackageCacheEnabled, value);
+    notifyListeners();
+  }
+
+  Future<void> setContinueDownloadsDuringFinalization(bool value) async {
+    await _prefs.setBool(_kContinueDownloadsDuringFinalization, value);
     notifyListeners();
   }
 

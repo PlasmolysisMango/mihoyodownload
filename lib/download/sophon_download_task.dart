@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -139,6 +140,7 @@ class SophonDownloadTask extends DownloadJob {
           // Reassemble once from cached, independently verified chunks. This
           // handles a transient write failure without network redownload.
           final target = File(_targetPath(file.file));
+          await _clearFinalVerifiedMarker(file);
           if (await target.exists()) await target.delete();
           _receivedBytes = progressBase;
           _setStatus(DownloadStatus.downloading);
@@ -207,6 +209,7 @@ class SophonDownloadTask extends DownloadJob {
     bool countProgress = true,
   }) async {
     final target = File(_targetPath(file.file));
+    await _clearFinalVerifiedMarker(file);
     await target.parent.create(recursive: true);
     final raf = await target.open(mode: FileMode.write);
     final pending = <int, Future<_PreparedSophonChunk>>{};
@@ -352,14 +355,77 @@ class SophonDownloadTask extends DownloadJob {
 
   Future<bool> _isFinalFileValid(SophonFile file, {int? progressSize}) async {
     final target = File(_targetPath(file.file));
-    if (!await target.exists()) return false;
-    if (await target.length() != file.size) return false;
-    if (file.md5.isEmpty) {
+    if (!await target.exists()) {
+      await _clearFinalVerifiedMarker(file);
+      return false;
+    }
+    if (await target.length() != file.size) {
+      await _clearFinalVerifiedMarker(file);
+      return false;
+    }
+    if (await _hasValidatedFinalFile(file, target)) {
       _setVerifyProgress(progressSize, file.size, file.size);
       return true;
     }
+    if (file.md5.isEmpty) {
+      _setVerifyProgress(progressSize, file.size, file.size);
+      await _markValidatedFinalFile(file, target);
+      return true;
+    }
     final hash = await _fileMd5(target, progressSize: progressSize);
-    return hash == file.md5;
+    if (hash == file.md5) {
+      await _markValidatedFinalFile(file, target);
+      return true;
+    }
+    await _clearFinalVerifiedMarker(file);
+    return false;
+  }
+
+  Future<bool> _hasValidatedFinalFile(SophonFile file, File target) async {
+    final marker = File(_finalVerifiedMarkerPath(file));
+    if (!await marker.exists()) return false;
+    try {
+      final data = jsonDecode(await marker.readAsString());
+      if (data is! Map<String, dynamic>) return false;
+      final stat = await target.stat();
+      return data['path'] == target.path &&
+          data['file'] == file.file &&
+          data['size'] == file.size &&
+          data['md5'] == file.md5 &&
+          data['modifiedMillis'] == stat.modified.millisecondsSinceEpoch &&
+          data['version'] == version &&
+          data['categoryId'] == meta.categoryId;
+    } catch (_) {
+      await _clearFinalVerifiedMarker(file);
+      return false;
+    }
+  }
+
+  Future<void> _markValidatedFinalFile(SophonFile file, File target) async {
+    if (!await target.exists()) return;
+    final marker = File(_finalVerifiedMarkerPath(file));
+    final stat = await target.stat();
+    await marker.parent.create(recursive: true);
+    await marker.writeAsString(
+      jsonEncode({
+        'path': target.path,
+        'file': file.file,
+        'size': file.size,
+        'md5': file.md5,
+        'modifiedMillis': stat.modified.millisecondsSinceEpoch,
+        'version': version,
+        'categoryId': meta.categoryId,
+      }),
+    );
+  }
+
+  Future<void> _clearFinalVerifiedMarker(SophonFile file) async {
+    final marker = File(_finalVerifiedMarkerPath(file));
+    if (await marker.exists()) await marker.delete();
+  }
+
+  String _finalVerifiedMarkerPath(SophonFile file) {
+    return '${_targetPath(file.file)}.verified';
   }
 
   Future<void> _deleteChunkCache(SophonFile file) async {

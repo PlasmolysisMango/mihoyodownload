@@ -14,6 +14,8 @@ Future<void> main() async {
   final settings = AppSettings(prefs);
   final manager = DownloadManager(
     maxConcurrent: settings.maxConcurrent,
+    continueDownloadsDuringFinalization:
+        settings.continueDownloadsDuringFinalization,
     prefs: prefs,
   );
   manager.setSpeedLimit(settings.speedLimitBytesPerSec);
@@ -26,8 +28,11 @@ Future<void> main() async {
 }
 
 class HoYoDownloaderApp extends StatelessWidget {
-  const HoYoDownloaderApp(
-      {super.key, required this.settings, required this.manager});
+  const HoYoDownloaderApp({
+    super.key,
+    required this.settings,
+    required this.manager,
+  });
 
   final AppSettings settings;
   final DownloadManager manager;

@@ -220,6 +220,44 @@ void main() {
     },
   );
 
+  test('reuses verified final package marker without hashing again', () async {
+    final data = randomBytes(2 * 1024 * 1024);
+    final server = _RangeServer(data);
+    final uri = await server.start();
+
+    final savePath = '${tempDir.path}/file.bin';
+    final expectedMd5 = hex.encode(md5.convert(data).bytes);
+    final first = DownloadTask(
+      url: uri.toString(),
+      savePath: savePath,
+      totalSize: data.length,
+      expectedMd5: expectedMd5,
+      displayName: 'file.bin',
+    );
+
+    expect(await first.run(), isTrue);
+    expect(File(first.finalVerifiedMarkerPath).existsSync(), isTrue);
+
+    final second = DownloadTask(
+      url: uri.toString(),
+      savePath: savePath,
+      totalSize: data.length,
+      expectedMd5: expectedMd5,
+      displayName: 'file.bin',
+    );
+    final verifyingProgress = <int>[];
+    second.addListener(() {
+      if (second.status == DownloadStatus.verifying) {
+        verifyingProgress.add(second.verificationBytes);
+      }
+    });
+
+    expect(await second.run(), isTrue);
+
+    expect(verifyingProgress, [0, data.length]);
+    await server.stop();
+  });
+
   test('resumes from existing tmp file with Range header', () async {
     final data = randomBytes(256 * 1024);
     final server = _RangeServer(data);
