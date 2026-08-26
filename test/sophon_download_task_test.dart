@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hoyo_downloader/download/download_job.dart';
 import 'package:hoyo_downloader/download/rate_limiter.dart';
 import 'package:hoyo_downloader/download/sophon_download_task.dart';
+import 'package:hoyo_downloader/download/verified_file_index.dart';
 import 'package:hoyo_downloader/download/zstd_codec.dart';
 import 'package:hoyo_downloader/models/sophon_models.dart';
 
@@ -197,8 +198,14 @@ void main() {
 
       expect(await first.run(), isTrue);
       expect(
-        File('${tempDir.path}/Game/file.txt.verified').existsSync(),
+        File(
+          VerifiedFileIndex.indexPathFor('${tempDir.path}/Game'),
+        ).existsSync(),
         isTrue,
+      );
+      expect(
+        File('${tempDir.path}/Game/file.txt.verified').existsSync(),
+        isFalse,
       );
 
       final second = SophonDownloadTask(

@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 
 import 'download_job.dart';
 import 'rate_limiter.dart';
+import 'verified_file_index.dart';
 
 const _publishCopyChunkSize = 4 * 1024 * 1024;
 
@@ -106,8 +107,9 @@ class DownloadTask extends DownloadJob {
     return '$tmpPath.verified';
   }
 
-  /// Sidecar marker written only after the final file passed verification.
-  String get finalVerifiedMarkerPath => '$savePath.verified';
+  /// Directory-level index entry written after the final file passed verification.
+  String get finalVerifiedIndexRoot => File(savePath).parent.path;
+  String get finalVerifiedIndexKey => _fileName(savePath);
 
   String get _tmpPath => tmpPath;
 
@@ -322,40 +324,38 @@ class DownloadTask extends DownloadJob {
   }
 
   Future<bool> _hasValidatedFinalFile(File file) async {
-    if (!await file.exists() || await file.length() != totalSize) return false;
-    final marker = File(finalVerifiedMarkerPath);
-    if (!await marker.exists()) return false;
-    try {
-      final data = jsonDecode(await marker.readAsString());
-      if (data is! Map<String, dynamic>) return false;
-      final stat = await file.stat();
-      return data['savePath'] == savePath &&
-          data['totalSize'] == totalSize &&
-          data['expectedMd5'] == expectedMd5 &&
-          data['modifiedMillis'] == stat.modified.millisecondsSinceEpoch;
-    } catch (_) {
-      await _clearValidatedFinalFileMarker();
-      return false;
-    }
-  }
-
-  Future<void> _markValidatedFinalFile(File file) async {
-    if (!await file.exists()) return;
-    final marker = File(finalVerifiedMarkerPath);
-    final stat = await file.stat();
-    await marker.parent.create(recursive: true);
-    await marker.writeAsString(
-      jsonEncode({
-        'savePath': savePath,
-        'totalSize': totalSize,
-        'expectedMd5': expectedMd5,
-        'modifiedMillis': stat.modified.millisecondsSinceEpoch,
-      }),
+    return VerifiedFileIndex.isVerified(
+      root: finalVerifiedIndexRoot,
+      key: finalVerifiedIndexKey,
+      file: file,
+      size: totalSize,
+      md5: expectedMd5,
+      context: const {'type': 'package'},
     );
   }
 
+  Future<void> _markValidatedFinalFile(File file) async {
+    await VerifiedFileIndex.markVerified(
+      root: finalVerifiedIndexRoot,
+      key: finalVerifiedIndexKey,
+      file: file,
+      size: totalSize,
+      md5: expectedMd5,
+      context: const {'type': 'package'},
+    );
+    await _deleteLegacyFinalVerifiedMarker();
+  }
+
   Future<void> _clearValidatedFinalFileMarker() async {
-    final marker = File(finalVerifiedMarkerPath);
+    await VerifiedFileIndex.remove(
+      finalVerifiedIndexRoot,
+      finalVerifiedIndexKey,
+    );
+    await _deleteLegacyFinalVerifiedMarker();
+  }
+
+  Future<void> _deleteLegacyFinalVerifiedMarker() async {
+    final marker = File('$savePath.verified');
     if (await marker.exists()) await marker.delete();
   }
 

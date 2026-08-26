@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -10,6 +9,7 @@ import 'package:http/http.dart' as http;
 import '../models/sophon_models.dart';
 import 'download_job.dart';
 import 'rate_limiter.dart';
+import 'verified_file_index.dart';
 import 'zstd_codec.dart';
 
 const _maxChunkPrefetch = 3;
@@ -382,50 +382,59 @@ class SophonDownloadTask extends DownloadJob {
   }
 
   Future<bool> _hasValidatedFinalFile(SophonFile file, File target) async {
-    final marker = File(_finalVerifiedMarkerPath(file));
-    if (!await marker.exists()) return false;
-    try {
-      final data = jsonDecode(await marker.readAsString());
-      if (data is! Map<String, dynamic>) return false;
-      final stat = await target.stat();
-      return data['path'] == target.path &&
-          data['file'] == file.file &&
-          data['size'] == file.size &&
-          data['md5'] == file.md5 &&
-          data['modifiedMillis'] == stat.modified.millisecondsSinceEpoch &&
-          data['version'] == version &&
-          data['categoryId'] == meta.categoryId;
-    } catch (_) {
-      await _clearFinalVerifiedMarker(file);
-      return false;
-    }
-  }
-
-  Future<void> _markValidatedFinalFile(SophonFile file, File target) async {
-    if (!await target.exists()) return;
-    final marker = File(_finalVerifiedMarkerPath(file));
-    final stat = await target.stat();
-    await marker.parent.create(recursive: true);
-    await marker.writeAsString(
-      jsonEncode({
-        'path': target.path,
-        'file': file.file,
-        'size': file.size,
-        'md5': file.md5,
-        'modifiedMillis': stat.modified.millisecondsSinceEpoch,
+    return VerifiedFileIndex.isVerified(
+      root: _finalVerifiedIndexRoot(file),
+      key: _finalVerifiedIndexKey(file),
+      file: target,
+      size: file.size,
+      md5: file.md5,
+      context: {
+        'type': 'sophon',
         'version': version,
         'categoryId': meta.categoryId,
-      }),
+      },
     );
   }
 
-  Future<void> _clearFinalVerifiedMarker(SophonFile file) async {
-    final marker = File(_finalVerifiedMarkerPath(file));
-    if (await marker.exists()) await marker.delete();
+  Future<void> _markValidatedFinalFile(SophonFile file, File target) async {
+    await VerifiedFileIndex.markVerified(
+      root: _finalVerifiedIndexRoot(file),
+      key: _finalVerifiedIndexKey(file),
+      file: target,
+      size: file.size,
+      md5: file.md5,
+      context: {
+        'type': 'sophon',
+        'version': version,
+        'categoryId': meta.categoryId,
+      },
+    );
+    await _deleteLegacyFinalVerifiedMarker(file);
   }
 
-  String _finalVerifiedMarkerPath(SophonFile file) {
-    return '${_targetPath(file.file)}.verified';
+  Future<void> _clearFinalVerifiedMarker(SophonFile file) async {
+    await VerifiedFileIndex.remove(
+      _finalVerifiedIndexRoot(file),
+      _finalVerifiedIndexKey(file),
+    );
+    await _deleteLegacyFinalVerifiedMarker(file);
+  }
+
+  String _finalVerifiedIndexRoot(SophonFile file) {
+    final parts = _safeRelativePath(file.file).split(Platform.pathSeparator);
+    if (parts.length <= 1) return saveDir;
+    return '$saveDir${Platform.pathSeparator}${parts.first}';
+  }
+
+  String _finalVerifiedIndexKey(SophonFile file) {
+    final parts = _safeRelativePath(file.file).split(Platform.pathSeparator);
+    if (parts.length <= 1) return parts.first;
+    return parts.skip(1).join(Platform.pathSeparator);
+  }
+
+  Future<void> _deleteLegacyFinalVerifiedMarker(SophonFile file) async {
+    final marker = File('${_targetPath(file.file)}.verified');
+    if (await marker.exists()) await marker.delete();
   }
 
   Future<void> _deleteChunkCache(SophonFile file) async {
@@ -442,12 +451,15 @@ class SophonDownloadTask extends DownloadJob {
   }
 
   String _targetPath(String file) {
-    final safe = file
+    return '$saveDir${Platform.pathSeparator}${_safeRelativePath(file)}';
+  }
+
+  String _safeRelativePath(String file) {
+    return file
         .replaceAll('\\', '/')
         .split('/')
         .where((p) => p.isNotEmpty && p != '..')
         .join(Platform.pathSeparator);
-    return '$saveDir${Platform.pathSeparator}$safe';
   }
 
   String _chunkPath(SophonChunk chunk) => '$cacheDir/${chunk.id}';

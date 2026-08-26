@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hoyo_downloader/download/download_job.dart';
 import 'package:hoyo_downloader/download/download_task.dart';
 import 'package:hoyo_downloader/download/rate_limiter.dart';
+import 'package:hoyo_downloader/download/verified_file_index.dart';
 
 /// A tiny local HTTP server supporting Range requests, used to verify the
 /// download engine's resume and md5 logic without touching the real CDN.
@@ -236,7 +237,13 @@ void main() {
     );
 
     expect(await first.run(), isTrue);
-    expect(File(first.finalVerifiedMarkerPath).existsSync(), isTrue);
+    expect(
+      File(
+        VerifiedFileIndex.indexPathFor(File(savePath).parent.path),
+      ).existsSync(),
+      isTrue,
+    );
+    expect(File('$savePath.verified').existsSync(), isFalse);
 
     final second = DownloadTask(
       url: uri.toString(),

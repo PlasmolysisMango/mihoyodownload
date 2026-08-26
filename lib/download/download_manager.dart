@@ -10,6 +10,7 @@ import 'download_job.dart';
 import 'download_task.dart';
 import 'rate_limiter.dart';
 import 'sophon_download_task.dart';
+import 'verified_file_index.dart';
 
 /// Serial/concurrent download queue, the counterpart of Starward's
 /// `GameInstallService` task scheduling (simplified to download-only).
@@ -514,8 +515,12 @@ class DownloadManager extends ChangeNotifier {
       if (task is DownloadTask) {
         final finalFile = File(task.savePath);
         if (await finalFile.exists()) await finalFile.delete();
-        final finalMarker = File(task.finalVerifiedMarkerPath);
-        if (await finalMarker.exists()) await finalMarker.delete();
+        await VerifiedFileIndex.remove(
+          task.finalVerifiedIndexRoot,
+          task.finalVerifiedIndexKey,
+        );
+        final legacyFinalMarker = File('${task.savePath}.verified');
+        if (await legacyFinalMarker.exists()) await legacyFinalMarker.delete();
         final tmpFile = File(task.tmpPath);
         if (await tmpFile.exists()) await tmpFile.delete();
         final markerPath = task.validatedCacheMarkerPath;
