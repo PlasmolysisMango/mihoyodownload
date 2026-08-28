@@ -341,7 +341,7 @@ class DownloadManager extends ChangeNotifier {
   }
 
   bool _occupiesQueueSlot(DownloadJob task) {
-    if (_continueDownloadsDuringFinalization) {
+    if (_continueDownloadsDuringFinalization && task.hasFastCache) {
       return task.consumesDownloadSlot;
     }
     return task.isActive;

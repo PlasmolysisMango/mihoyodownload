@@ -119,6 +119,9 @@ class DownloadTask extends DownloadJob {
       _status == DownloadStatus.verifying ||
       _status == DownloadStatus.publishing;
 
+  @override
+  bool get hasFastCache => cacheDir != null && cacheDir!.isNotEmpty;
+
   /// Runs the download until completion, pause or failure.
   /// Returns true when the file is completed and verified.
   @override

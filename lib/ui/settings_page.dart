@@ -313,38 +313,6 @@ class _SettingsPageState extends State<SettingsPage> {
               },
             ),
           ),
-          SwitchListTile(
-            secondary: const Icon(Icons.playlist_play),
-            title: const Text('校验/复制时继续后续下载'),
-            subtitle: const Text('开启后，任务完成网络下载并进入校验或复制阶段时，不再占用同时下载任务数；默认关闭。'),
-            value: settings.continueDownloadsDuringFinalization,
-            onChanged: _busy
-                ? null
-                : (value) {
-                    settings.setContinueDownloadsDuringFinalization(value);
-                    context
-                            .read<DownloadManager>()
-                            .continueDownloadsDuringFinalization =
-                        value;
-                  },
-          ),
-          SwitchListTile(
-            secondary: const Icon(Icons.fast_forward),
-            title: const Text('Chunk 模式提前下载下一个文件'),
-            subtitle: const Text(
-              '开启后，Chunk 模式内某个文件进入最终校验阶段时，会提前下载下一个文件的分片到缓存目录；不影响最终文件的写入顺序。默认关闭。',
-            ),
-            value: settings.sophonPrefetchDuringVerification,
-            onChanged: _busy
-                ? null
-                : (value) {
-                    settings.setSophonPrefetchDuringVerification(value);
-                    context
-                            .read<DownloadManager>()
-                            .sophonPrefetchDuringVerification =
-                        value;
-                  },
-          ),
           ListTile(
             leading: const Icon(Icons.speed),
             title: const Text('下载限速'),
@@ -367,6 +335,55 @@ class _SettingsPageState extends State<SettingsPage> {
                 context.read<DownloadManager>().setSpeedLimit(value);
               },
             ),
+          ),
+          const Divider(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Text(
+              '高速缓存优化',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text(
+              '以下选项仅对配置了独立高速缓存目录的任务生效，默认关闭。',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.fast_forward),
+            title: const Text('Chunk 校验时预取下一个文件'),
+            subtitle: const Text(
+              '低风险：仅在当前 Chunk 任务内部提前下载下一个文件的分片到高速缓存，不改变最终文件写入顺序。',
+            ),
+            value: settings.sophonPrefetchDuringVerification,
+            onChanged: _busy
+                ? null
+                : (value) {
+                    settings.setSophonPrefetchDuringVerification(value);
+                    context
+                            .read<DownloadManager>()
+                            .sophonPrefetchDuringVerification =
+                        value;
+                  },
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.playlist_play),
+            title: const Text('校验/复制时继续后续任务'),
+            subtitle: const Text(
+              '较高风险：当前任务校验或复制期间释放并发槽，让其他排队任务开始下载；可能增加高速缓存和最终存储的 I/O 压力。',
+            ),
+            value: settings.continueDownloadsDuringFinalization,
+            onChanged: _busy
+                ? null
+                : (value) {
+                    settings.setContinueDownloadsDuringFinalization(value);
+                    context
+                            .read<DownloadManager>()
+                            .continueDownloadsDuringFinalization =
+                        value;
+                  },
           ),
         ],
       ),

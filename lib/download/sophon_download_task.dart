@@ -17,6 +17,7 @@ const _chunkDownloadAttempts = 3;
 const _chunkRequestTimeout = Duration(seconds: 30);
 const _chunkPartTimeout = Duration(seconds: 30);
 const _chunkCacheThreshold = 8 * 1024 * 1024;
+const _publishCopyChunkSize = 4 * 1024 * 1024;
 
 /// Downloads one Sophon category by small official chunks.
 ///
@@ -60,6 +61,8 @@ class SophonDownloadTask extends DownloadJob {
   int _receivedBytes = 0;
   int _verificationBytes = 0;
   int _verificationTotalBytes = 0;
+  int _publishingBytes = 0;
+  int _publishingTotalBytes = 0;
   double _speed = 0;
   String? _error;
   DownloadStatus _status = DownloadStatus.queued;
@@ -80,6 +83,13 @@ class SophonDownloadTask extends DownloadJob {
   double get verificationProgress => _verificationTotalBytes <= 0
       ? 0
       : _verificationBytes / _verificationTotalBytes;
+
+  @override
+  int get publishingBytes => _publishingBytes;
+
+  @override
+  double get publishingProgress =>
+      _publishingTotalBytes <= 0 ? 0 : _publishingBytes / _publishingTotalBytes;
 
   @override
   double get progress => totalSize <= 0 ? 0 : _receivedBytes / totalSize;
@@ -106,6 +116,19 @@ class SophonDownloadTask extends DownloadJob {
     return '$root/${meta.categoryId}';
   }
 
+  /// Whether an independent high-speed cache directory is configured.
+  ///
+  /// Only then does it make sense to assemble and verify each final file in
+  /// the cache first, and only copy to the (possibly slow, e.g. USB) final
+  /// destination once verification passes; otherwise the cache already lives
+  /// on the same device as the final destination, so writing there first and
+  /// copying again would just double the slow-device I/O for no benefit.
+  bool get _usesFastCacheAssembly =>
+      chunkCacheDir != null && chunkCacheDir!.isNotEmpty;
+
+  @override
+  bool get hasFastCache => _usesFastCacheAssembly;
+
   @override
   Future<bool> run() async {
     if (_status == DownloadStatus.completed) return true;
@@ -114,6 +137,8 @@ class SophonDownloadTask extends DownloadJob {
     _receivedBytes = 0;
     _verificationBytes = 0;
     _verificationTotalBytes = 0;
+    _publishingBytes = 0;
+    _publishingTotalBytes = 0;
     _networkBytes = 0;
     _lastNetworkBytes = 0;
     _setStatus(DownloadStatus.downloading);
@@ -146,28 +171,48 @@ class SophonDownloadTask extends DownloadJob {
           notifyListeners();
           continue;
         }
+        if (_usesFastCacheAssembly &&
+            await _verifyAssembledFile(
+              file,
+              progressSize: fileCompressedSize,
+            )) {
+          // Already assembled and verified in the cache by a previous run;
+          // only the copy to the final (possibly slow, e.g. USB) destination
+          // failed or was interrupted, so resume from there without
+          // redownloading or reassembling anything.
+          await _discardPrefetch(currentPrefetch);
+          _receivedBytes = progressBase + fileCompressedSize;
+          notifyListeners();
+          await _publishAssembledFile(file, progressSize: fileCompressedSize);
+          if (_abortRequested) return _pause();
+          await _deleteChunkCache(file);
+          continue;
+        }
         _receivedBytes = progressBase;
         _setStatus(DownloadStatus.downloading);
         await _assembleFile(file, prefetch: currentPrefetch);
         if (_abortRequested) return _pause();
         _beginVerifying();
-        if (prefetchNextFileDuringVerification) {
+        if (prefetchNextFileDuringVerification && _usesFastCacheAssembly) {
           prefetchedFile ??= _startNextFilePrefetch(files, fileIndex + 1);
         }
-        if (!await _isFinalFileValid(file, progressSize: fileCompressedSize)) {
+        if (!await _verifyAssembledFile(
+          file,
+          progressSize: fileCompressedSize,
+        )) {
           // Reassemble once from cached, independently verified chunks. This
           // handles a transient write failure without network redownload.
-          final target = File(_targetPath(file.file));
-          await _clearFinalVerifiedMarker(file);
-          if (await target.exists()) await target.delete();
+          final assemblyTarget = File(_assemblyTargetPath(file));
+          await _clearAssemblyVerifiedMarker(file);
+          if (await assemblyTarget.exists()) await assemblyTarget.delete();
           _receivedBytes = progressBase;
           _setStatus(DownloadStatus.downloading);
           await _assembleFile(file, countProgress: false);
           _beginVerifying();
-          if (prefetchNextFileDuringVerification) {
+          if (prefetchNextFileDuringVerification && _usesFastCacheAssembly) {
             prefetchedFile ??= _startNextFilePrefetch(files, fileIndex + 1);
           }
-          if (!await _isFinalFileValid(
+          if (!await _verifyAssembledFile(
             file,
             progressSize: fileCompressedSize,
           )) {
@@ -176,6 +221,10 @@ class SophonDownloadTask extends DownloadJob {
           }
           _receivedBytes = progressBase + fileCompressedSize;
           notifyListeners();
+        }
+        if (_usesFastCacheAssembly) {
+          await _publishAssembledFile(file, progressSize: fileCompressedSize);
+          if (_abortRequested) return _pause();
         }
         await _deleteChunkCache(file);
       }
@@ -230,8 +279,8 @@ class SophonDownloadTask extends DownloadJob {
     bool countProgress = true,
     _SophonFilePrefetch? prefetch,
   }) async {
-    final target = File(_targetPath(file.file));
-    await _clearFinalVerifiedMarker(file);
+    final target = File(_assemblyTargetPath(file));
+    await _clearAssemblyVerifiedMarker(file);
     await target.parent.create(recursive: true);
     final raf = await target.open(mode: FileMode.write);
     final queue = prefetch ?? _SophonFilePrefetch(file);
@@ -478,6 +527,126 @@ class SophonDownloadTask extends DownloadJob {
     if (await marker.exists()) await marker.delete();
   }
 
+  /// Verifies whichever path the current assembly target is: the final
+  /// destination when no independent fast cache is configured (unchanged
+  /// behavior), or the cache copy when [_usesFastCacheAssembly] is true.
+  Future<bool> _verifyAssembledFile(
+    SophonFile file, {
+    int? progressSize,
+  }) async {
+    if (!_usesFastCacheAssembly) {
+      return _isFinalFileValid(file, progressSize: progressSize);
+    }
+    final cacheFile = File(_cachedAssemblyPath(file));
+    if (!await cacheFile.exists() || await cacheFile.length() != file.size) {
+      await _clearCacheVerifiedMarker(file);
+      return false;
+    }
+    if (await _hasValidatedCacheAssembly(file, cacheFile)) {
+      _setVerifyProgress(progressSize, file.size, file.size);
+      return true;
+    }
+    if (file.md5.isEmpty) {
+      _setVerifyProgress(progressSize, file.size, file.size);
+      await _markValidatedCacheAssembly(file, cacheFile);
+      return true;
+    }
+    final hash = await _fileMd5(cacheFile, progressSize: progressSize);
+    if (hash == file.md5) {
+      await _markValidatedCacheAssembly(file, cacheFile);
+      return true;
+    }
+    await _clearCacheVerifiedMarker(file);
+    return false;
+  }
+
+  Future<void> _clearAssemblyVerifiedMarker(SophonFile file) async {
+    if (_usesFastCacheAssembly) {
+      await _clearCacheVerifiedMarker(file);
+    } else {
+      await _clearFinalVerifiedMarker(file);
+    }
+  }
+
+  String get _cacheAssemblyIndexRoot => '$cacheDir/assembled';
+
+  String _cacheAssemblyIndexKey(SophonFile file) =>
+      _safeRelativePath(file.file);
+
+  Future<bool> _hasValidatedCacheAssembly(SophonFile file, File cacheFile) {
+    return VerifiedFileIndex.isVerified(
+      root: _cacheAssemblyIndexRoot,
+      key: _cacheAssemblyIndexKey(file),
+      file: cacheFile,
+      size: file.size,
+      md5: file.md5,
+      context: {
+        'type': 'sophon-cache',
+        'version': version,
+        'categoryId': meta.categoryId,
+      },
+    );
+  }
+
+  Future<void> _markValidatedCacheAssembly(SophonFile file, File cacheFile) {
+    return VerifiedFileIndex.markVerified(
+      root: _cacheAssemblyIndexRoot,
+      key: _cacheAssemblyIndexKey(file),
+      file: cacheFile,
+      size: file.size,
+      md5: file.md5,
+      context: {
+        'type': 'sophon-cache',
+        'version': version,
+        'categoryId': meta.categoryId,
+      },
+    );
+  }
+
+  Future<void> _clearCacheVerifiedMarker(SophonFile file) {
+    return VerifiedFileIndex.remove(
+      _cacheAssemblyIndexRoot,
+      _cacheAssemblyIndexKey(file),
+    );
+  }
+
+  /// Copies the already-verified cache-assembled file to the final
+  /// (possibly slow, e.g. USB) destination with explicit backpressure, then
+  /// trusts that verified copy instead of re-hashing the final file again.
+  Future<void> _publishAssembledFile(
+    SophonFile file, {
+    int? progressSize,
+  }) async {
+    final cacheFile = File(_cachedAssemblyPath(file));
+    final finalFile = File(_targetPath(file.file));
+    await finalFile.parent.create(recursive: true);
+    await _clearFinalVerifiedMarker(file);
+    _beginPublishing();
+    final source = await cacheFile.open(mode: FileMode.read);
+    final target = await finalFile.open(mode: FileMode.write);
+    var processed = 0;
+    final total = file.size;
+    try {
+      await target.truncate(0);
+      while (true) {
+        if (_abortRequested) throw const _SophonPausedException();
+        final chunk = await source.read(_publishCopyChunkSize);
+        if (chunk.isEmpty) break;
+        await target.writeFrom(chunk);
+        processed += chunk.length;
+        _setPublishProgress(progressSize, processed, total);
+      }
+      await target.flush();
+    } finally {
+      await source.close();
+      await target.close();
+    }
+    if (_abortRequested) throw const _SophonPausedException();
+    await _markValidatedFinalFile(file, finalFile);
+    await _clearCacheVerifiedMarker(file);
+    if (await cacheFile.exists()) await cacheFile.delete();
+  }
+
   Future<void> _deleteChunkCache(SophonFile file) async {
     for (final chunk in file.chunks) {
       await _deleteChunk(chunk);
@@ -494,6 +663,15 @@ class SophonDownloadTask extends DownloadJob {
   String _targetPath(String file) {
     return '$saveDir${Platform.pathSeparator}${_safeRelativePath(file)}';
   }
+
+  /// The path an in-progress file is being written to: the cache copy when
+  /// [_usesFastCacheAssembly] is enabled, otherwise the final destination.
+  String _assemblyTargetPath(SophonFile file) => _usesFastCacheAssembly
+      ? _cachedAssemblyPath(file)
+      : _targetPath(file.file);
+
+  String _cachedAssemblyPath(SophonFile file) =>
+      '$cacheDir/assembled/${_safeRelativePath(file.file)}';
 
   String _safeRelativePath(String file) {
     return file
@@ -545,6 +723,8 @@ class SophonDownloadTask extends DownloadJob {
     _receivedBytes = 0;
     _verificationBytes = 0;
     _verificationTotalBytes = 0;
+    _publishingBytes = 0;
+    _publishingTotalBytes = 0;
     notifyListeners();
   }
 
@@ -554,6 +734,8 @@ class SophonDownloadTask extends DownloadJob {
     _error = null;
     _verificationBytes = 0;
     _verificationTotalBytes = 0;
+    _publishingBytes = 0;
+    _publishingTotalBytes = 0;
     _setStatus(DownloadStatus.queued);
   }
 
@@ -596,6 +778,20 @@ class SophonDownloadTask extends DownloadJob {
     _verificationTotalBytes = progressSize;
     final phaseBytes = (processed / total * progressSize).round();
     _verificationBytes = phaseBytes.clamp(0, totalSize).toInt();
+    notifyListeners();
+  }
+
+  void _beginPublishing() {
+    _publishingBytes = 0;
+    _publishingTotalBytes = 0;
+    _setStatus(DownloadStatus.publishing);
+  }
+
+  void _setPublishProgress(int? progressSize, int processed, int total) {
+    if (progressSize == null || total <= 0) return;
+    _publishingTotalBytes = progressSize;
+    final phaseBytes = (processed / total * progressSize).round();
+    _publishingBytes = phaseBytes.clamp(0, totalSize).toInt();
     notifyListeners();
   }
 

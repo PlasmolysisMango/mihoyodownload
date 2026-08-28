@@ -45,6 +45,13 @@ abstract class DownloadJob extends ChangeNotifier {
   /// Whether this task is still consuming a network download concurrency slot.
   bool get consumesDownloadSlot => status == DownloadStatus.downloading;
 
+  /// Whether this task's verification/publish phase reads and writes an
+  /// independent high-speed cache directory rather than the (possibly slow,
+  /// e.g. USB) final destination. Defaults to true so simple test doubles
+  /// keep their previous behavior; real tasks override this to reflect
+  /// whether a dedicated cache directory is actually configured.
+  bool get hasFastCache => true;
+
   Future<bool> run();
   void pause();
   Future<void> cancel();
