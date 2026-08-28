@@ -33,6 +33,7 @@ class SophonDownloadTask extends DownloadJob {
     this.initialManifest,
     this.chunkCacheDir,
     this.rateLimiter,
+    this.prefetchNextFileDuringVerification = false,
     this.zstdCodec = const ZstandardZstdCodec(),
   });
 
@@ -43,6 +44,12 @@ class SophonDownloadTask extends DownloadJob {
   final SophonChunkManifest? initialManifest;
   final RateLimiter? rateLimiter;
   final ZstdCodec zstdCodec;
+
+  /// Whether the next file's chunks should start downloading while the
+  /// current file is in its final MD5 verification phase. Prefetched data
+  /// only lands in the chunk cache; the final (possibly slow, e.g. USB)
+  /// target file is still written strictly one file at a time.
+  bool prefetchNextFileDuringVerification;
 
   SophonChunkManifest? _manifest;
   http.Client? _client;
@@ -114,7 +121,14 @@ class SophonDownloadTask extends DownloadJob {
     _client = http.Client();
     try {
       final manifest = await _loadManifest();
-      for (final file in manifest.files) {
+      final files = manifest.files;
+      _SophonFilePrefetch? prefetchedFile;
+      for (var fileIndex = 0; fileIndex < files.length; fileIndex++) {
+        final file = files[fileIndex];
+        final currentPrefetch = prefetchedFile?.file == file
+            ? prefetchedFile
+            : null;
+        if (currentPrefetch != null) prefetchedFile = null;
         if (_abortRequested) return _pause();
         if (file.isFolder) {
           await Directory(_targetPath(file.file)).create(recursive: true);
@@ -127,15 +141,19 @@ class SophonDownloadTask extends DownloadJob {
         final progressBase = _receivedBytes;
         _beginVerifying();
         if (await _isFinalFileValid(file, progressSize: fileCompressedSize)) {
+          await _discardPrefetch(currentPrefetch);
           _receivedBytes += fileCompressedSize;
           notifyListeners();
           continue;
         }
         _receivedBytes = progressBase;
         _setStatus(DownloadStatus.downloading);
-        await _assembleFile(file);
+        await _assembleFile(file, prefetch: currentPrefetch);
         if (_abortRequested) return _pause();
         _beginVerifying();
+        if (prefetchNextFileDuringVerification) {
+          prefetchedFile ??= _startNextFilePrefetch(files, fileIndex + 1);
+        }
         if (!await _isFinalFileValid(file, progressSize: fileCompressedSize)) {
           // Reassemble once from cached, independently verified chunks. This
           // handles a transient write failure without network redownload.
@@ -146,6 +164,9 @@ class SophonDownloadTask extends DownloadJob {
           _setStatus(DownloadStatus.downloading);
           await _assembleFile(file, countProgress: false);
           _beginVerifying();
+          if (prefetchNextFileDuringVerification) {
+            prefetchedFile ??= _startNextFilePrefetch(files, fileIndex + 1);
+          }
           if (!await _isFinalFileValid(
             file,
             progressSize: fileCompressedSize,
@@ -207,32 +228,21 @@ class SophonDownloadTask extends DownloadJob {
   Future<void> _assembleFile(
     SophonFile file, {
     bool countProgress = true,
+    _SophonFilePrefetch? prefetch,
   }) async {
     final target = File(_targetPath(file.file));
     await _clearFinalVerifiedMarker(file);
     await target.parent.create(recursive: true);
     final raf = await target.open(mode: FileMode.write);
-    final pending = <int, Future<_PreparedSophonChunk>>{};
-    var nextPrefetchIndex = 0;
-
-    void prefetchMore() {
-      while (!_abortRequested &&
-          nextPrefetchIndex < file.chunks.length &&
-          pending.length < _maxChunkPrefetch) {
-        final index = nextPrefetchIndex++;
-        final future = _prepareChunk(file.chunks[index]);
-        unawaited(future.then<void>((_) {}, onError: (_) {}));
-        pending[index] = future;
-      }
-    }
+    final queue = prefetch ?? _SophonFilePrefetch(file);
 
     try {
       await raf.truncate(file.size);
-      prefetchMore();
+      _prefetchMore(queue);
       for (var index = 0; index < file.chunks.length; index++) {
         if (_abortRequested) throw const _SophonPausedException();
-        final prepared = await pending.remove(index)!;
-        prefetchMore();
+        final prepared = await queue.pending.remove(index)!;
+        _prefetchMore(queue);
         if (_abortRequested) throw const _SophonPausedException();
         await raf.setPosition(prepared.chunk.offset);
         await raf.writeFrom(prepared.decompressed);
@@ -242,13 +252,44 @@ class SophonDownloadTask extends DownloadJob {
         }
       }
     } finally {
-      await Future.wait(
-        pending.values.map(
-          (future) => future.then<void>((_) {}, onError: (_) {}),
-        ),
-      );
+      await _discardPrefetch(queue);
       await raf.close();
     }
+  }
+
+  _SophonFilePrefetch? _startNextFilePrefetch(
+    List<SophonFile> files,
+    int startIndex,
+  ) {
+    for (var i = startIndex; i < files.length; i++) {
+      final file = files[i];
+      if (file.isFolder || file.chunks.isEmpty) continue;
+      final queue = _SophonFilePrefetch(file);
+      _prefetchMore(queue);
+      return queue;
+    }
+    return null;
+  }
+
+  void _prefetchMore(_SophonFilePrefetch queue) {
+    while (!_abortRequested &&
+        queue.nextPrefetchIndex < queue.file.chunks.length &&
+        queue.pending.length < _maxChunkPrefetch) {
+      final index = queue.nextPrefetchIndex++;
+      final future = _prepareChunk(queue.file.chunks[index]);
+      unawaited(future.then<void>((_) {}, onError: (_) {}));
+      queue.pending[index] = future;
+    }
+  }
+
+  Future<void> _discardPrefetch(_SophonFilePrefetch? queue) async {
+    if (queue == null) return;
+    await Future.wait(
+      queue.pending.values.map(
+        (future) => future.then<void>((_) {}, onError: (_) {}),
+      ),
+    );
+    queue.pending.clear();
   }
 
   Future<_PreparedSophonChunk> _prepareChunk(SophonChunk chunk) async {
@@ -581,6 +622,14 @@ class SophonDownloadTask extends DownloadJob {
 
 class _SophonPausedException implements Exception {
   const _SophonPausedException();
+}
+
+class _SophonFilePrefetch {
+  _SophonFilePrefetch(this.file);
+
+  final SophonFile file;
+  final Map<int, Future<_PreparedSophonChunk>> pending = {};
+  var nextPrefetchIndex = 0;
 }
 
 class _PreparedSophonChunk {

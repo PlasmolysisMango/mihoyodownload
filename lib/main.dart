@@ -16,6 +16,7 @@ Future<void> main() async {
     maxConcurrent: settings.maxConcurrent,
     continueDownloadsDuringFinalization:
         settings.continueDownloadsDuringFinalization,
+    sophonPrefetchDuringVerification: settings.sophonPrefetchDuringVerification,
     prefs: prefs,
   );
   manager.setSpeedLimit(settings.speedLimitBytesPerSec);

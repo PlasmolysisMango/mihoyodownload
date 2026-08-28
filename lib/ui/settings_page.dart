@@ -328,6 +328,23 @@ class _SettingsPageState extends State<SettingsPage> {
                         value;
                   },
           ),
+          SwitchListTile(
+            secondary: const Icon(Icons.fast_forward),
+            title: const Text('Chunk 模式提前下载下一个文件'),
+            subtitle: const Text(
+              '开启后，Chunk 模式内某个文件进入最终校验阶段时，会提前下载下一个文件的分片到缓存目录；不影响最终文件的写入顺序。默认关闭。',
+            ),
+            value: settings.sophonPrefetchDuringVerification,
+            onChanged: _busy
+                ? null
+                : (value) {
+                    settings.setSophonPrefetchDuringVerification(value);
+                    context
+                            .read<DownloadManager>()
+                            .sophonPrefetchDuringVerification =
+                        value;
+                  },
+          ),
           ListTile(
             leading: const Icon(Icons.speed),
             title: const Text('下载限速'),

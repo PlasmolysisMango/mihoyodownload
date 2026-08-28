@@ -399,6 +399,26 @@ void main() {
   });
 
   test(
+    'sophonPrefetchDuringVerification setter updates existing Sophon tasks',
+    () async {
+      final manager = DownloadManager(maxConcurrent: 1);
+      manager.addSophonManifests(
+        groupName: 'Game 1.0',
+        saveDir: tempDir.path,
+        version: '1.0',
+        manifests: [(sophonMeta(), const SophonChunkManifest(files: []))],
+      );
+      final task = manager.tasks.single as SophonDownloadTask;
+      expect(task.prefetchNextFileDuringVerification, isFalse);
+
+      manager.sophonPrefetchDuringVerification = true;
+
+      expect(manager.sophonPrefetchDuringVerification, isTrue);
+      expect(task.prefetchNextFileDuringVerification, isTrue);
+    },
+  );
+
+  test(
     'AppSettings stores cache directory and experimental chunk flag',
     () async {
       final prefs = await SharedPreferences.getInstance();
@@ -408,6 +428,7 @@ void main() {
       expect(settings.experimentalChunkEnabled, isFalse);
       expect(settings.packageCacheEnabled, isFalse);
       expect(settings.continueDownloadsDuringFinalization, isFalse);
+      expect(settings.sophonPrefetchDuringVerification, isFalse);
       expect(settings.resolvePackageCacheDir(), isNull);
       expect(
         settings.resolveChunkCacheDir('${tempDir.path}/download'),
@@ -432,6 +453,9 @@ void main() {
 
       await settings.setContinueDownloadsDuringFinalization(true);
       expect(settings.continueDownloadsDuringFinalization, isTrue);
+
+      await settings.setSophonPrefetchDuringVerification(true);
+      expect(settings.sophonPrefetchDuringVerification, isTrue);
 
       await settings.setCacheDir(null);
       expect(settings.customCacheDir, isNull);

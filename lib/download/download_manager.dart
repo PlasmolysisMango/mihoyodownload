@@ -20,10 +20,12 @@ class DownloadManager extends ChangeNotifier {
   DownloadManager({
     int maxConcurrent = 2,
     bool continueDownloadsDuringFinalization = false,
+    bool sophonPrefetchDuringVerification = false,
     SharedPreferences? prefs,
   }) : _maxConcurrent = maxConcurrent,
        _continueDownloadsDuringFinalization =
            continueDownloadsDuringFinalization,
+       _sophonPrefetchDuringVerification = sophonPrefetchDuringVerification,
        _prefs = prefs;
 
   static const _kTasksKey = 'download_tasks';
@@ -47,6 +49,22 @@ class DownloadManager extends ChangeNotifier {
     _continueDownloadsDuringFinalization = value;
     notifyListeners();
     _pump();
+  }
+
+  /// When enabled, a Sophon task starts downloading the next file's chunks
+  /// while the current file is in its final MD5 verification phase. This
+  /// only affects chunk-cache network activity, not final (e.g. USB) writes.
+  bool _sophonPrefetchDuringVerification;
+  bool get sophonPrefetchDuringVerification =>
+      _sophonPrefetchDuringVerification;
+  set sophonPrefetchDuringVerification(bool value) {
+    _sophonPrefetchDuringVerification = value;
+    for (final task in _tasks) {
+      if (task is SophonDownloadTask) {
+        task.prefetchNextFileDuringVerification = value;
+      }
+    }
+    notifyListeners();
   }
 
   /// Shared limiter for the aggregate speed of all tasks.
@@ -135,6 +153,7 @@ class DownloadManager extends ChangeNotifier {
         groupName: groupName,
         chunkCacheDir: chunkCacheDir,
         rateLimiter: rateLimiter,
+        prefetchNextFileDuringVerification: _sophonPrefetchDuringVerification,
       );
       _attachTask(task);
       _tasks.add(task);
@@ -240,6 +259,7 @@ class DownloadManager extends ChangeNotifier {
         groupName: e['groupName'] as String? ?? '',
         chunkCacheDir: e['chunkCacheDir'] as String?,
         rateLimiter: rateLimiter,
+        prefetchNextFileDuringVerification: _sophonPrefetchDuringVerification,
       );
     } else {
       final savePathRaw = e['savePath'] as String? ?? '';

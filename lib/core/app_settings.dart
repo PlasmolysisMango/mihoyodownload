@@ -14,6 +14,8 @@ class AppSettings extends ChangeNotifier {
   static const _kPackageCacheEnabled = 'package_cache_enabled';
   static const _kContinueDownloadsDuringFinalization =
       'continue_downloads_during_finalization';
+  static const _kSophonPrefetchDuringVerification =
+      'sophon_prefetch_during_verification';
   static const _kMaxConcurrent = 'max_concurrent';
   static const _kSpeedLimit = 'speed_limit_bps';
 
@@ -39,6 +41,11 @@ class AppSettings extends ChangeNotifier {
   /// Whether verification/copy phases should free the download queue slot.
   bool get continueDownloadsDuringFinalization =>
       _prefs.getBool(_kContinueDownloadsDuringFinalization) ?? false;
+
+  /// Whether a Sophon task should start the next file's chunk downloads
+  /// while the current file is in its final MD5 verification phase.
+  bool get sophonPrefetchDuringVerification =>
+      _prefs.getBool(_kSophonPrefetchDuringVerification) ?? false;
 
   /// The effective download root: the custom directory when set,
   /// otherwise `<app documents>/downloads`.
@@ -105,6 +112,11 @@ class AppSettings extends ChangeNotifier {
 
   Future<void> setContinueDownloadsDuringFinalization(bool value) async {
     await _prefs.setBool(_kContinueDownloadsDuringFinalization, value);
+    notifyListeners();
+  }
+
+  Future<void> setSophonPrefetchDuringVerification(bool value) async {
+    await _prefs.setBool(_kSophonPrefetchDuringVerification, value);
     notifyListeners();
   }
 

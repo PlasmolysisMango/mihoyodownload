@@ -172,6 +172,98 @@ void main() {
   });
 
   test(
+    'starts next file chunk download while current file is verifying',
+    () async {
+      final firstBytes = Uint8List.fromList(List.filled(16 * 1024 * 1024, 1));
+      final secondBytes = Uint8List.fromList(List.filled(256 * 1024, 2));
+      final chunks = {'first': firstBytes, 'second': secondBytes};
+      final manifest = SophonChunkManifest(
+        files: [
+          SophonFile(
+            file: 'Game/first.bin',
+            chunks: [
+              SophonChunk(
+                id: 'first',
+                uncompressedMd5: hex.encode(md5.convert(firstBytes).bytes),
+                offset: 0,
+                compressedSize: firstBytes.length,
+                uncompressedSize: firstBytes.length,
+                compressedMd5: hex.encode(md5.convert(firstBytes).bytes),
+              ),
+            ],
+            isFolder: false,
+            size: firstBytes.length,
+            md5: hex.encode(md5.convert(firstBytes).bytes),
+          ),
+          SophonFile(
+            file: 'Game/second.bin',
+            chunks: [
+              SophonChunk(
+                id: 'second',
+                uncompressedMd5: hex.encode(md5.convert(secondBytes).bytes),
+                offset: 0,
+                compressedSize: secondBytes.length,
+                uncompressedSize: secondBytes.length,
+                compressedMd5: hex.encode(md5.convert(secondBytes).bytes),
+              ),
+            ],
+            isFolder: false,
+            size: secondBytes.length,
+            md5: hex.encode(md5.convert(secondBytes).bytes),
+          ),
+        ],
+      );
+      final server = _ChunkServer(chunks);
+      final baseUrl = await server.start();
+      final meta = SophonManifestMeta.fromPersistedJson({
+        ...const SophonManifestMeta(
+          categoryId: 'cat',
+          categoryName: 'Test Category',
+          matchingField: 'game',
+          manifestId: 'manifest',
+          manifestChecksum: '',
+          manifestCompressedSize: 0,
+          manifestUncompressedSize: 0,
+          manifestUrlPrefix: '',
+          manifestUrlSuffix: '',
+          chunkUrlPrefix: '',
+          chunkUrlSuffix: '',
+          compressedSize: 0,
+          uncompressedSize: 0,
+          fileCount: 2,
+          chunkCount: 2,
+        ).toJson(),
+        'chunkUrlPrefix': baseUrl.toString(),
+        'compressedSize': firstBytes.length + secondBytes.length,
+      });
+      final task = SophonDownloadTask(
+        meta: meta,
+        initialManifest: manifest,
+        saveDir: tempDir.path,
+        version: '1.0',
+        groupName: 'Test 1.0',
+        zstdCodec: const _FakeZstdCodec(),
+        prefetchNextFileDuringVerification: true,
+      );
+      final run = task.run();
+      var nextChunkStartedDuringVerify = false;
+      while (task.status != DownloadStatus.completed) {
+        if (task.status == DownloadStatus.verifying &&
+            (server.hits['second'] ?? 0) > 0) {
+          nextChunkStartedDuringVerify = true;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      final ok = await run;
+
+      expect(ok, isTrue);
+      expect(nextChunkStartedDuringVerify, isTrue);
+      await server.stop();
+    },
+  );
+
+  test(
     'reuses verified Sophon final file marker without hashing again',
     () async {
       final raw1 = Uint8List.fromList(List.filled(1024 * 1024, 1));
