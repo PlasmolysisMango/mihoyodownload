@@ -127,7 +127,7 @@ class _PackagePageState extends State<PackagePage> {
         parsed.add((meta, manifest));
       }
       final saveDir = await _downloadSaveDir(build.tag);
-      final chunkCacheDir = settings.resolveChunkCacheDir(saveDir);
+      final chunkCacheDir = settings.resolveIndependentChunkCacheDir();
       manager.addSophonManifests(
         groupName: '${widget.game.name} ${build.tag}',
         saveDir: saveDir,

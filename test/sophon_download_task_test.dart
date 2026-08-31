@@ -24,12 +24,14 @@ class _ChunkServer {
     this.chunks, {
     this.throttle,
     this.chunkSize = 64 * 1024,
+    this.onRequest,
     Map<String, int>? failuresBeforeSuccess,
   }) : failuresBeforeSuccess = failuresBeforeSuccess ?? const {};
 
   final Map<String, Uint8List> chunks;
   final Duration? throttle;
   final int chunkSize;
+  final void Function(String id)? onRequest;
   final Map<String, int> failuresBeforeSuccess;
   final Map<String, int> hits = {};
   late HttpServer _server;
@@ -39,6 +41,7 @@ class _ChunkServer {
     _server.listen((request) async {
       final id = request.uri.pathSegments.last;
       hits[id] = (hits[id] ?? 0) + 1;
+      onRequest?.call(id);
       if ((hits[id] ?? 0) <= (failuresBeforeSuccess[id] ?? 0)) {
         request.response.statusCode = HttpStatus.serviceUnavailable;
         await request.response.close();
@@ -240,6 +243,7 @@ void main() {
         meta: meta,
         initialManifest: manifest,
         saveDir: tempDir.path,
+        chunkCacheDir: '${tempDir.path}/fast_cache',
         version: '1.0',
         groupName: 'Test 1.0',
         zstdCodec: const _FakeZstdCodec(),
@@ -259,6 +263,115 @@ void main() {
 
       expect(ok, isTrue);
       expect(nextChunkStartedDuringVerify, isTrue);
+      await server.stop();
+    },
+  );
+
+  test(
+    'keeps filling next-file cache prefetch beyond the initial three chunks',
+    () async {
+      final firstBytes = Uint8List.fromList(List.filled(16 * 1024 * 1024, 1));
+      final nextBytes = List.generate(
+        5,
+        (index) => Uint8List.fromList(List.filled(256 * 1024, index + 2)),
+      );
+      final chunks = <String, Uint8List>{'first': firstBytes};
+      for (var i = 0; i < nextBytes.length; i++) {
+        chunks['next$i'] = nextBytes[i];
+      }
+      final nextFileBytes = Uint8List.fromList(
+        nextBytes.expand((bytes) => bytes).toList(),
+      );
+      final manifest = SophonChunkManifest(
+        files: [
+          SophonFile(
+            file: 'Game/first.bin',
+            chunks: [
+              SophonChunk(
+                id: 'first',
+                uncompressedMd5: hex.encode(md5.convert(firstBytes).bytes),
+                offset: 0,
+                compressedSize: firstBytes.length,
+                uncompressedSize: firstBytes.length,
+                compressedMd5: hex.encode(md5.convert(firstBytes).bytes),
+              ),
+            ],
+            isFolder: false,
+            size: firstBytes.length,
+            md5: hex.encode(md5.convert(firstBytes).bytes),
+          ),
+          SophonFile(
+            file: 'Game/second.bin',
+            chunks: [
+              for (var i = 0; i < nextBytes.length; i++)
+                SophonChunk(
+                  id: 'next$i',
+                  uncompressedMd5: hex.encode(md5.convert(nextBytes[i]).bytes),
+                  offset: i * nextBytes[i].length,
+                  compressedSize: nextBytes[i].length,
+                  uncompressedSize: nextBytes[i].length,
+                  compressedMd5: hex.encode(md5.convert(nextBytes[i]).bytes),
+                ),
+            ],
+            isFolder: false,
+            size: nextFileBytes.length,
+            md5: hex.encode(md5.convert(nextFileBytes).bytes),
+          ),
+        ],
+      );
+      late SophonDownloadTask task;
+      final requestStatuses = <String, DownloadStatus>{};
+      final server = _ChunkServer(
+        chunks,
+        onRequest: (id) {
+          if (id.startsWith('next')) requestStatuses[id] = task.status;
+        },
+      );
+      final baseUrl = await server.start();
+      final meta = SophonManifestMeta.fromPersistedJson({
+        ...const SophonManifestMeta(
+          categoryId: 'cat',
+          categoryName: 'Test Category',
+          matchingField: 'game',
+          manifestId: 'manifest',
+          manifestChecksum: '',
+          manifestCompressedSize: 0,
+          manifestUncompressedSize: 0,
+          manifestUrlPrefix: '',
+          manifestUrlSuffix: '',
+          chunkUrlPrefix: '',
+          chunkUrlSuffix: '',
+          compressedSize: 0,
+          uncompressedSize: 0,
+          fileCount: 2,
+          chunkCount: 6,
+        ).toJson(),
+        'chunkUrlPrefix': baseUrl.toString(),
+        'compressedSize': chunks.values.fold<int>(
+          0,
+          (sum, b) => sum + b.length,
+        ),
+      });
+      task = SophonDownloadTask(
+        meta: meta,
+        initialManifest: manifest,
+        saveDir: '${tempDir.path}/external_drive',
+        chunkCacheDir: '${tempDir.path}/fast_cache',
+        version: '1.0',
+        groupName: 'Test 1.0',
+        zstdCodec: const _FakeZstdCodec(),
+        prefetchNextFileDuringVerification: true,
+      );
+
+      expect(await task.run(), isTrue);
+
+      expect(requestStatuses.length, nextBytes.length);
+      // The fourth chunk proves that completed requests replenished the
+      // three-request prefetch window before second-file assembly began.
+      expect(requestStatuses['next3'], isNot(DownloadStatus.downloading));
+      for (var i = 0; i < nextBytes.length; i++) {
+        expect(server.hits['next$i'], 1);
+      }
       await server.stop();
     },
   );
@@ -351,8 +464,16 @@ void main() {
     );
 
     var sawPublishing = false;
+    var sawPublishingFinalizing = false;
+    var finalizingProgress = 1.0;
     task.addListener(() {
-      if (task.status == DownloadStatus.publishing) sawPublishing = true;
+      if (task.status == DownloadStatus.publishing) {
+        sawPublishing = true;
+        if (task.isPublishingFinalizing) {
+          sawPublishingFinalizing = true;
+          finalizingProgress = task.publishingProgress;
+        }
+      }
     });
 
     final ok = await task.run();
@@ -366,6 +487,9 @@ void main() {
     // With a fast cache configured, the file is assembled and verified in
     // the cache first, then published (copied) to the final destination.
     expect(sawPublishing, isTrue);
+    expect(sawPublishingFinalizing, isTrue);
+    expect(finalizingProgress, lessThan(1));
+    expect(task.publishingProgress, 1);
     expect(
       await File('${tempDir.path}/external_drive/Game/file.txt').readAsBytes(),
       Uint8List.fromList([...raw1, ...'world'.codeUnits]),
@@ -525,17 +649,19 @@ void main() {
         meta: meta,
         initialManifest: manifest,
         saveDir: tempDir.path,
+        chunkCacheDir: '${tempDir.path}/.sophon/chunks',
         version: '1.0',
         groupName: 'Test 1.0',
         zstdCodec: const _FakeZstdCodec(),
         prefetchNextFileDuringVerification: true,
       );
 
+      expect(task.hasFastCache, isFalse);
       final ok = await task.run();
 
       expect(ok, isTrue);
-      // No chunkCacheDir configured, so the prefetch gate stays closed even
-      // though the flag itself is enabled: the second file's chunk is only
+      // The explicit default cache path is not an independent fast cache, so
+      // the prefetch gate stays closed even though the flag itself is enabled: the second file's chunk is only
       // requested once its own sequential download phase starts, not while
       // the first file is still verifying.
       expect(secondRequestedStatus, DownloadStatus.downloading);

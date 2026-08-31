@@ -430,6 +430,7 @@ void main() {
       expect(settings.continueDownloadsDuringFinalization, isFalse);
       expect(settings.sophonPrefetchDuringVerification, isFalse);
       expect(settings.resolvePackageCacheDir(), isNull);
+      expect(settings.resolveIndependentChunkCacheDir(), isNull);
       expect(
         settings.resolveChunkCacheDir('${tempDir.path}/download'),
         '${tempDir.path}/download/.sophon/chunks',
@@ -442,6 +443,7 @@ void main() {
       expect(settings.customCacheDir, cacheDir);
       expect(settings.customChunkCacheDir, cacheDir);
       expect(settings.resolvePackageCacheDir(), isNull);
+      expect(settings.resolveIndependentChunkCacheDir(), cacheDir);
       expect(
         settings.resolveChunkCacheDir('${tempDir.path}/download'),
         cacheDir,

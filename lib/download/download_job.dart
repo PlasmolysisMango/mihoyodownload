@@ -31,6 +31,10 @@ abstract class DownloadJob extends ChangeNotifier {
   /// Current publish/copy progress, independent from download progress.
   double get publishingProgress => 0;
 
+  /// Whether all bytes have been written but flush/close and metadata cleanup
+  /// are still in progress.
+  bool get isPublishingFinalizing => false;
+
   double get speed;
   String? get error;
   String get displayName;

@@ -70,12 +70,16 @@ class DownloadTask extends DownloadJob {
       totalSize <= 0 ? 0 : _verificationBytes / totalSize;
 
   int _publishingBytes = 0;
+  bool _isPublishingFinalizing = false;
   @override
   int get publishingBytes => _publishingBytes;
 
   @override
   double get publishingProgress =>
       totalSize <= 0 ? 0 : _publishingBytes / totalSize;
+
+  @override
+  bool get isPublishingFinalizing => _isPublishingFinalizing;
 
   @override
   double get progress => totalSize <= 0 ? 0 : _receivedBytes / totalSize;
@@ -131,6 +135,7 @@ class DownloadTask extends DownloadJob {
     _error = null;
     _verificationBytes = 0;
     _publishingBytes = 0;
+    _isPublishingFinalizing = false;
     _setStatus(DownloadStatus.downloading);
     try {
       final finalFile = File(savePath);
@@ -175,6 +180,7 @@ class DownloadTask extends DownloadJob {
         notifyListeners();
         await _publishCompletedFile(tmpFile);
         await _markValidatedFinalFile(File(savePath));
+        _finishPublishing();
         _setStatus(DownloadStatus.completed);
         return true;
       }
@@ -193,6 +199,7 @@ class DownloadTask extends DownloadJob {
         await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
         await _markValidatedFinalFile(File(savePath));
+        _finishPublishing();
         _setStatus(DownloadStatus.completed);
         return true;
       } else {
@@ -282,6 +289,7 @@ class DownloadTask extends DownloadJob {
         await _markValidatedCache();
         await _publishCompletedFile(tmpFile);
         await _markValidatedFinalFile(File(savePath));
+        _finishPublishing();
         _setStatus(DownloadStatus.completed);
         return true;
       }
@@ -441,11 +449,13 @@ class DownloadTask extends DownloadJob {
         final chunk = await source.read(_publishCopyChunkSize);
         if (chunk.isEmpty) break;
         await target.writeFrom(chunk);
-        _publishingBytes = (_publishingBytes + chunk.length)
-            .clamp(0, totalSize)
-            .toInt();
+        final processed = _publishingBytes + chunk.length;
+        final progressLimit = totalSize > 0 ? totalSize - 1 : 0;
+        _publishingBytes = processed.clamp(0, progressLimit).toInt();
         notifyListeners();
       }
+      _isPublishingFinalizing = true;
+      notifyListeners();
       await target.flush();
     } finally {
       speedTimer.cancel();
@@ -479,6 +489,7 @@ class DownloadTask extends DownloadJob {
     _setStatus(DownloadStatus.canceled);
     _verificationBytes = 0;
     _publishingBytes = 0;
+    _isPublishingFinalizing = false;
     try {
       final tmpFile = File(_tmpPath);
       if (await tmpFile.exists()) await tmpFile.delete();
@@ -495,6 +506,7 @@ class DownloadTask extends DownloadJob {
     _error = null;
     _verificationBytes = 0;
     _publishingBytes = 0;
+    _isPublishingFinalizing = false;
     _setStatus(DownloadStatus.queued);
   }
 
@@ -526,11 +538,21 @@ class DownloadTask extends DownloadJob {
 
   void _beginPublishing() {
     _publishingBytes = 0;
+    _isPublishingFinalizing = false;
     _setStatus(DownloadStatus.publishing);
+  }
+
+  void _finishPublishing() {
+    _publishingBytes = totalSize;
+    _isPublishingFinalizing = false;
+    notifyListeners();
   }
 
   void _setStatus(DownloadStatus value) {
     _status = value;
+    if (value != DownloadStatus.publishing) {
+      _isPublishingFinalizing = false;
+    }
     notifyListeners();
   }
 

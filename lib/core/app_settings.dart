@@ -42,8 +42,8 @@ class AppSettings extends ChangeNotifier {
   bool get continueDownloadsDuringFinalization =>
       _prefs.getBool(_kContinueDownloadsDuringFinalization) ?? false;
 
-  /// Whether a Sophon task should start the next file's chunk downloads
-  /// while the current file is in its final MD5 verification phase.
+  /// Whether a Sophon task should keep downloading the next file's chunks
+  /// while the current file is being verified, published, and cleaned up.
   bool get sophonPrefetchDuringVerification =>
       _prefs.getBool(_kSophonPrefetchDuringVerification) ?? false;
 
@@ -74,9 +74,15 @@ class AppSettings extends ChangeNotifier {
   /// behavior. A custom directory can point to faster internal storage while
   /// downloaded game files still go to an external drive.
   String resolveChunkCacheDir(String downloadDir) {
+    return resolveIndependentChunkCacheDir() ?? '$downloadDir/.sophon/chunks';
+  }
+
+  /// The independently configured Sophon cache root, or null when Chunk mode
+  /// should use its default cache under the download directory.
+  String? resolveIndependentChunkCacheDir() {
     final custom = customCacheDir;
     if (custom != null && custom.isNotEmpty) return custom;
-    return '$downloadDir/.sophon/chunks';
+    return null;
   }
 
   /// The effective package cache root; null keeps the legacy direct tmp path.

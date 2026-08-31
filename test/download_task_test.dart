@@ -150,10 +150,12 @@ void main() {
         cacheDir: cacheDir,
       );
       final publishingProgress = <int>[];
+      final publishingFinalizing = <bool>[];
       final publishedFileLengths = <int>[];
       task.addListener(() {
         if (task.status == DownloadStatus.publishing) {
           publishingProgress.add(task.publishingBytes);
+          publishingFinalizing.add(task.isPublishingFinalizing);
           final file = File(savePath);
           publishedFileLengths.add(file.existsSync() ? file.lengthSync() : 0);
         }
@@ -169,6 +171,10 @@ void main() {
       expect(publishingProgress, contains(0));
       expect(publishingProgress.where((value) => value > 0), isNotEmpty);
       expect(publishingProgress.last, data.length);
+      expect(publishingFinalizing, contains(true));
+      final finalizingIndex = publishingFinalizing.indexOf(true);
+      expect(publishingProgress[finalizingIndex], lessThan(data.length));
+      expect(publishingFinalizing.last, isFalse);
       for (var i = 0; i < publishingProgress.length; i++) {
         expect(
           publishingProgress[i],

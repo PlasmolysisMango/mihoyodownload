@@ -353,9 +353,9 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           SwitchListTile(
             secondary: const Icon(Icons.fast_forward),
-            title: const Text('Chunk 校验时预取下一个文件'),
+            title: const Text('Chunk 校验/复制时预取下一个文件'),
             subtitle: const Text(
-              '低风险：仅在当前 Chunk 任务内部提前下载下一个文件的分片到高速缓存，不改变最终文件写入顺序。',
+              '低风险：当前 Chunk 文件校验、复制及清理期间，持续预取下一个文件的分片到高速缓存，不改变最终文件写入顺序。',
             ),
             value: settings.sophonPrefetchDuringVerification,
             onChanged: _busy

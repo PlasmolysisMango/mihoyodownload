@@ -51,9 +51,9 @@ class DownloadManager extends ChangeNotifier {
     _pump();
   }
 
-  /// When enabled, a Sophon task starts downloading the next file's chunks
-  /// while the current file is in its final MD5 verification phase. This
-  /// only affects chunk-cache network activity, not final (e.g. USB) writes.
+  /// When enabled, a Sophon task keeps downloading the next file's chunks
+  /// while the current file is being verified, published, and cleaned up.
+  /// This only affects chunk-cache network activity, not final writes.
   bool _sophonPrefetchDuringVerification;
   bool get sophonPrefetchDuringVerification =>
       _sophonPrefetchDuringVerification;
